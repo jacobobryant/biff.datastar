@@ -20,8 +20,29 @@
     (is (str/includes? body "data-signals:message-count"))
     (is (str/includes? body "requestAnimationFrame(() =&gt; { el.scrollTop = el.scrollHeight; })"))
     (is (str/includes? body "@post(&quot;/messages&quot;)"))
-    (is (not (str/includes? body "\"X-CSRF-Token\":")))
-    (is (not (str/includes? body "{contentType: &apos;form&apos;")))))
+     (is (not (str/includes? body "\"X-CSRF-Token\":")))
+     (is (not (str/includes? body "{contentType: &apos;form&apos;")))))
+
+(deftest missing-channel-page-does-not-create-a-channel
+  (let [previous-state @demo/app-state]
+    (try
+      (reset! demo/app-state {:channels {"general" {:id "general"
+                                                    :name "general"
+                                                    :messages []}}
+                              :channel-order ["general"]
+                              :tab-state {}})
+      (let [response (demo/app-sync {:request-method :get
+                                     :uri "/"
+                                     :headers {}
+                                     :query-params {"channel" "missing"}})
+            body (:body response)]
+        (is (= 200 (:status response)))
+        (is (str/includes? body "Channel not found"))
+        (is (str/includes? body "#missing"))
+        (is (not (str/includes? body "@post(&quot;/messages&quot;)")))
+        (is (nil? (get-in @demo/app-state [:channels "missing"]))))
+      (finally
+        (reset! demo/app-state previous-state)))))
 
 (deftest send-message-action-clears-message-signal
   (let [previous-state @demo/app-state]
@@ -29,12 +50,13 @@
        (reset! demo/app-state {:channels {"general" {:id "general"
                                                      :name "general"
                                                      :messages []}}
-                               :channel-order ["general"]
-                               :tab-state {}})
+                                :channel-order ["general"]
+                                :tab-state {}})
         (let [response (#'demo/send-message-handler
                         {:biff.datastar/signals {:displayname "Alice"
+                                                 :channelid "general"
                                                  :messagetext "hello"}
-                          :biff.datastar/tab-state {:channel-id "general"}})]
+                         })]
         (is (= 200 (:status response)))
         (is (= "text/event-stream; charset=utf-8"
                (get-in response [:headers "Content-Type"])))
@@ -45,10 +67,19 @@
          (reset! demo/app-state previous-state)))))
 
 (deftest set-channel-action-uses-empty-204-response
-  (let [response (#'demo/set-channel-handler
-                   {:biff.datastar/signals {:channelid "general"}
-                    :biff.datastar/tab-state {:channel-id "__new__"}})]
-    (is (= 204 (:status response)))
-    (is (nil? (:body response)))
-    (is (= {:channel-id "general"}
-           (:biff.datastar/tab-state response)))))
+  (let [previous-state @demo/app-state]
+    (try
+       (reset! demo/app-state {:channels {"general" {:id "general"
+                                                     :name "general"
+                                                     :messages []}}
+                               :channel-order ["general"]
+                               :tab-state {"tab-1" {:channel-id "__new__"}}})
+      (let [response (#'demo/set-channel-handler
+                      {:biff.datastar/tab-id "tab-1"
+                       :biff.datastar/signals {:channelid "general"}})]
+        (is (= 204 (:status response)))
+        (is (nil? (:body response)))
+        (is (= "general"
+               (get-in @demo/app-state [:tab-state "tab-1" :channel-id]))))
+      (finally
+        (reset! demo/app-state previous-state)))))

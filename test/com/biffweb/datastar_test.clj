@@ -39,22 +39,18 @@
     (datastar/refresh lock-state)
     (is (= 1 @(:biff.datastar/epoch lock-state)))))
 
-(deftest wrap-datastar-persists-tab-state-on-normal-response
-  (let [store (atom {})
+(deftest wrap-datastar-attaches-tab-id
+  (let [seen-tab-id (atom nil)
         handler (datastar/wrap-datastar
                  (fn [req]
-                     {:status 204
-                      :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
+                   (reset! seen-tab-id (:biff.datastar/tab-id req))
+                   {:status 204}))
         request (merge (datastar/new-lock)
                        {:request-method :post
                         :headers {"datastar-request" "true"}
-                        :body-params {:tabId "tab-1"}
-                        :biff.datastar/get-user-id (constantly "user-1")
-                        :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
-                        :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
-                                                       (swap! store assoc tab-id tab-state))})]
+                        :body-params {:tabId "tab-1"}})]
     (handler request)
-    (is (= {:channel-id "general"} (@store "tab-1")))))
+    (is (= "tab-1" @seen-tab-id))))
 
 (deftest wrap-datastar-normalizes-signal-keys
   (let [handler (datastar/wrap-datastar
@@ -69,24 +65,19 @@
             :messageText "hello"}
            (:body response)))))
 
-(deftest sse-response-streams-initial-patch-and-touches-last-seen
-  (let [store (atom {"tab-1" {:channel-id "general"}})
-        rendered (atom "<div id=\"biff-datastar-content\">Hello</div>")
-        handler (datastar/wrap-datastar
+(deftest sse-response-streams-initial-patch
+  (let [handler (datastar/wrap-datastar
                  (fn [req]
-                    {:status 200
-                     :body @rendered
-                     :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
+                   {:status 200
+                     :body (str "<div id=\"biff-datastar-content\">Hello from "
+                               (:biff.datastar/tab-id req)
+                               "</div>")}))
         request (merge (datastar/new-lock)
                        {:request-method :get
                         :headers {"x-biff-datastar-page-request" "true"
                                   "accept" "text/event-stream"
                                   "datastar-request" "true"}
-                        :params {"datastar" "{\"tabId\":\"tab-1\"}"}
-                        :biff.datastar/get-user-id (constantly "user-1")
-                        :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
-                        :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
-                                                       (swap! store assoc tab-id tab-state))})
+                        :params {"datastar" "{\"tabId\":\"tab-1\"}"}})
          response (handler request)
          body (:body response)]
     (is (= 200 (:status response)))
@@ -95,11 +86,10 @@
           in (PipedInputStream. out 65536)
           writer (future (rp/write-body-to-stream body nil out))]
       (try
-        (is (wait-for #(contains? (get @store "tab-1") :biff.datastar/last-seen)))
         (is (wait-for #(pos? (.available in))))
         (let [buf (byte-array (.available in))]
           (.read in buf)
-          (is (str/includes? (brotli/decompress-stream buf) "event: datastar-patch-elements")))
+          (is (str/includes? (brotli/decompress-stream buf) "Hello from tab-1")))
         (finally
           (datastar/refresh request)
           (.close in)
