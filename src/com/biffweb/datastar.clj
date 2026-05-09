@@ -6,8 +6,6 @@
     [com.biffweb.datastar.impl.brotli :as brotli]
     [ring.core.protocols :as rp])
   (:import
-    (java.io ByteArrayInputStream InputStream Reader)
-    (java.nio.charset StandardCharsets)
     (java.time Duration Instant)
     (java.util.concurrent TimeUnit)
     (java.util.concurrent.locks Condition ReentrantLock)))
@@ -23,17 +21,11 @@
 (defn- js-string [s]
   (pr-str s))
 
-(defn- csrf-header-fields [req]
-  (cond-> []
-    (:anti-forgery-token req)
-    (conj (str "'X-CSRF-Token': " (js-string (:anti-forgery-token req))))))
-
 (defn- headers-expr [fields]
   (str "({" (str/join ", " fields) "})"))
 
 (defn- connection-action [req]
-  (let [headers (conj (csrf-header-fields req)
-                       "'X-Biff-Datastar-Page-Request': 'true'")
+  (let [headers ["'X-Biff-Datastar-Page-Request': 'true'"]
         options (str "{headers: " (headers-expr headers) ", "
                        "openWhenHidden: true, "
                        "retryMaxCount: Infinity}")]
@@ -55,17 +47,17 @@
 
 (defn configure-csrf
   "Returns a JS module string that adds the Ring anti-forgery token to Datastar's
-  non-GET backend actions."
+  backend actions."
   ([csrf-token]
    (configure-csrf default-datastar-script-url csrf-token))
   ([datastar-script-url csrf-token]
-   (str "import { action, actions, root } from "
+   (str "import { action, actions } from "
         (js-string datastar-script-url)
         ";\n"
-         "const methods = ['post', 'put', 'patch', 'delete'];\n"
-         "const originals = Object.fromEntries(methods.map(name => [name, actions[name]]));\n"
-         "const csrfHeader = "
-         (headers-expr [(str "'X-CSRF-Token': " (js-string csrf-token))])
+         "const methods = ['get', 'post', 'put', 'patch', 'delete'];\n"
+          "const originals = Object.fromEntries(methods.map(name => [name, actions[name]]));\n"
+          "const csrfHeader = "
+          (headers-expr [(str "'X-CSRF-Token': " (js-string csrf-token))])
          ";\n"
          "const mergeOptions = (options = {}) => ({\n"
          "  ...options,\n"
@@ -85,34 +77,26 @@
          "  });\n"
          "}\n")))
 
-(defn- json-content-type? [req]
-  (some-> (get-in req [:headers "content-type"])
-          str/lower-case
-          (str/starts-with? "application/json")))
-
-(defn- body-string [body]
+(defn- parse-signals [signals]
   (cond
-    (nil? body) nil
-    (string? body) body
-    (instance? Reader body) (slurp ^Reader body)
-    (instance? InputStream body) (slurp ^InputStream body)
-    :else (slurp body)))
+    (nil? signals) nil
+    (map? signals) signals
+    (string? signals) (when-let [signals (some-> signals str/trim not-empty)]
+                        (json/read-str signals))
+    :else
+    (throw (ex-info "Datastar request signals must already be parsed into a map or be provided as a JSON string."
+                    {:signals-type (type signals)}))))
 
-(defn- parse-signals-json [s]
-  (when-let [s (some-> s str/trim not-empty)]
-    (json/read-str s)))
+(defn- request-signals [req]
+  (or (get-in req [:params "datastar"])
+      (when (= "true" (get-in req [:headers "datastar-request"]))
+        (or (not-empty (:form-params req))
+            (not-empty (:body-params req))
+            (:params req)))))
 
 (defn- attach-signals [req]
-  (if-let [signals-json (or (get-in req [:params "datastar"])
-                            (when (and (= "true" (get-in req [:headers "datastar-request"]))
-                                       (json-content-type? req))
-                              (body-string (:body req))))]
-    (let [signals (parse-signals-json signals-json)
-          body (:body req)
-          req (assoc req :biff.datastar/signals signals)]
-      (if (instance? InputStream body)
-        (assoc req :body (ByteArrayInputStream. (.getBytes signals-json StandardCharsets/UTF_8)))
-        req))
+  (if-some [signals (some-> (request-signals req) parse-signals)]
+    (assoc req :biff.datastar/signals signals)
     req))
 
 (defn new-lock
@@ -169,8 +153,7 @@
     (get-in req [:session :uid])))
 
 (defn- attach-tab-state [req]
-  (let [tab-id (or (get-in req [:biff.datastar/signals "tabId"])
-                   (get-in req [:headers "x-biff-datastar-tab-id"]))
+  (let [tab-id (get-in req [:biff.datastar/signals "tabId"])
         user-id* (user-id req)
         tab-state (read-tab-state req user-id* tab-id)]
     (assoc req

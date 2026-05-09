@@ -6,6 +6,7 @@
     [dev.onionpancakes.chassis.core :as chassis]
     [ring.adapter.jetty :as ring-jetty]
     [ring.middleware.anti-forgery :refer [wrap-anti-forgery]]
+    [ring.middleware.json :refer [wrap-json-params]]
     [ring.middleware.params :refer [wrap-params]]
     [ring.middleware.session :refer [wrap-session]])
   (:import
@@ -84,7 +85,14 @@
       "general"))
 
 (defn- signal-value [req k]
-  (trim-to-nil (get-in req [:biff.datastar/signals k])))
+  (let [normalize (fn [s]
+                    (some-> s name str/lower-case (str/replace "-" "") (str/replace "_" "")))
+        key* (normalize k)]
+    (some->> (:biff.datastar/signals req)
+             (some (fn [[signal-name value]]
+                     (when (= key* (normalize signal-name))
+                       value)))
+             trim-to-nil)))
 
 (defn- current-channel-id [req]
   (or (selected-channel-id (selected-channel-option req))
@@ -154,13 +162,13 @@ button.secondary { background: #475569; }
 (defn- channel-selector [req]
   (let [selected-option (selected-channel-option req)]
      [:div.stack
-      [:form.stack (merge {:data-on:change (form-action "/channel")}
-                          (input-signal "channel-id" selected-option))
-       [:label
-        "Channel"
-        [:select {:id "channel-select"
-                  :name "channelId"
-                  :data-bind:channel-id ""}
+       [:form.stack (merge {:data-on:change (form-action "/channel")}
+                           (input-signal "channelId" selected-option))
+        [:label
+         "Channel"
+         [:select {:id "channel-select"
+                   :name "channelId"
+                   :data-bind:channelId ""}
          (for [{:keys [id name]} (channels)]
            [:option (cond-> {:value id}
                      (= id selected-option)
@@ -171,16 +179,16 @@ button.secondary { background: #475569; }
                    (assoc :selected true))
          "new channel..."]]]]
       (when (new-channel-selected? req)
-        [:form.stack
-         (merge {:data-on:submit (form-action "/channels")}
-                (input-signal "new-channel-name" ""))
-        [:label
-         "Create a channel"
-         [:input {:id "new-channel-name"
-                  :name "newChannelName"
-                  :placeholder "team-updates"
-                  :required true
-                  :data-bind:new-channel-name ""}]]
+         [:form.stack
+          (merge {:data-on:submit (form-action "/channels")}
+                 (input-signal "newChannelName" ""))
+         [:label
+          "Create a channel"
+          [:input {:id "new-channel-name"
+                   :name "newChannelName"
+                   :placeholder "team-updates"
+                   :required true
+                   :data-bind:newChannelName ""}]]
         [:div.row
          [:button {:type "submit"} "Create channel"]]])]))
 
@@ -208,22 +216,22 @@ button.secondary { background: #475569; }
 (defn- composer [req]
   [:form.stack
    (merge {:data-on:submit (form-action "/messages")}
-          (input-signal "display-name" "Alice")
-          (input-signal "message-text" ""))
-   [:label
-    "Display name"
-    [:input {:id "display-name"
-             :name "displayName"
-             :placeholder "Sprite"
-             :required true
-             :data-bind:display-name ""}]]
-   [:label
-    "Message"
-    [:textarea {:id "message-text"
-                :name "messageText"
-                :placeholder "Type a message..."
-                :required true
-                :data-bind:message-text ""}]]
+           (input-signal "displayName" "Alice")
+           (input-signal "messageText" ""))
+    [:label
+     "Display name"
+     [:input {:id "display-name"
+              :name "displayName"
+              :placeholder "Sprite"
+              :required true
+              :data-bind:displayName ""}]]
+    [:label
+     "Message"
+     [:textarea {:id "message-text"
+                 :name "messageText"
+                 :placeholder "Type a message..."
+                 :required true
+                 :data-bind:messageText ""}]]
    [:div.row
      [:button {:type "submit"} "Send"]]])
 
@@ -265,26 +273,22 @@ button.secondary { background: #475569; }
          (assoc (or (:biff.datastar/tab-state req) {})
                  :channel-id
                  (or (signal-value req "channelId")
-                     (trim-to-nil (get-in req [:params "channelId"]))
                      "general"))))
 
 (defn- create-channel-handler [req]
-  (if-let [channel-id (or (signal-value req "newChannelName")
-                          (trim-to-nil (get-in req [:params "newChannelName"])))]
+  (if-let [channel-id (signal-value req "newChannelName")]
     (do
       (ensure-channel! channel-id)
-      (assoc (signal-patch-response {:channelId channel-id
-                                     :newChannelName ""})
+      (assoc (signal-patch-response {"channelid" channel-id
+                                     "newchannelname" ""})
              :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {})
                                              :channel-id channel-id)))
     {:status 204}))
 
 (defn- send-message-handler [req]
   (let [channel-id (current-channel-id req)
-        display-name (or (signal-value req "displayName")
-                         (trim-to-nil (get-in req [:params "displayName"])))
-        message-text (or (signal-value req "messageText")
-                         (trim-to-nil (get-in req [:params "messageText"])))]
+        display-name (signal-value req "displayName")
+        message-text (signal-value req "messageText")]
     (if (and display-name message-text)
       (do
         (ensure-channel! channel-id)
@@ -293,7 +297,7 @@ button.secondary { background: #475569; }
                      :display-name display-name
                      :text message-text
                      :created-at (Instant/now)})
-        (signal-patch-response {:messageText ""}))
+        (signal-patch-response {"messagetext" ""}))
       {:status 204})))
 
 (defn- not-found [_]
@@ -319,13 +323,14 @@ button.secondary { background: #475569; }
                                                (get-in @app-state [:tab-state (tab-state-key user-id tab-id)]))
                 :biff.datastar/set-tab-state (fn [_ user-id tab-id tab-state]
                                                (let [path [:tab-state (tab-state-key user-id tab-id)]]
-                                                (swap! app-state
-                                                       (fn [state]
-                                                          (if tab-state
-                                                            (assoc-in state path tab-state)
-                                                            (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
-      wrap-anti-forgery
+                                                 (swap! app-state
+                                                        (fn [state]
+                                                           (if tab-state
+                                                             (assoc-in state path tab-state)
+                                                             (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
+       wrap-anti-forgery
        wrap-session
+       (wrap-json-params {:keywords? false})
        wrap-params))
 
 (defonce server (atom nil))

@@ -15,9 +15,8 @@ Utilities for building Datastar-driven Ring apps on Biff.
 `container-opts` opens a long-lived Datastar `@get()` connection to the current page and sends:
 
 - the `tabId` signal on the SSE request
-- `X-CSRF-Token` when `:anti-forgery-token` is present on the Ring request
 
-Pair `container-opts` with `configure-csrf` to override Datastar's built-in `@post`, `@put`, `@patch`, and `@delete` actions so they include the Ring anti-forgery token while leaving `@get` alone:
+Pair `container-opts` with `configure-csrf` to override Datastar's built-in backend actions so they include the Ring anti-forgery token:
 
 ```clj
 [:script {:type "module"
@@ -31,7 +30,7 @@ Pair `container-opts` with `configure-csrf` to override Datastar's built-in `@po
   ...]]
 ```
 
-`wrap-datastar` reads the `tabId` signal from Datastar request signals, so the default JSON request mode works without custom tab-id headers.
+`wrap-datastar` reads the `tabId` signal from Datastar request signals, so the default JSON request mode works without custom tab-id headers. For non-GET Datastar requests, it expects upstream middleware to have already parsed the request body into `:form-params` or `:body-params`.
 
 ## Demo
 
