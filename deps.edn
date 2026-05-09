@@ -20,7 +20,7 @@
     com.aayushatharva.brotli4j/native-osx-aarch64 {:mvn/version "1.18.0"}
     com.aayushatharva.brotli4j/native-linux-aarch64 {:mvn/version "1.18.0"}}}
   :test
-  {:extra-paths ["test"]
+  {:extra-paths ["test" "demo"]
    :extra-deps
    {io.github.cognitect-labs/test-runner
     {:git/tag "v0.5.1" :git/sha "dfb30dd"}}

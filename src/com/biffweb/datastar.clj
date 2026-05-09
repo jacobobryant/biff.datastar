@@ -2,9 +2,10 @@
   (:require
    [clojure.string :as str]
    [com.biffweb.datastar.brotli :as brotli]
-   [dev.onionpancakes.chassis.core :as chassis])
+   [dev.onionpancakes.chassis.core :as chassis]
+   [ring.util.io :as ring-io])
   (:import
-   (java.io BufferedOutputStream PipedInputStream PipedOutputStream)
+   (java.io PipedInputStream)
    (java.time Duration Instant)
    (java.util.concurrent TimeUnit)
    (java.util.concurrent.locks Condition ReentrantLock)))
@@ -172,47 +173,43 @@
       (assoc :biff.datastar/sse-request true)))
 
 (defn- pipe-response-body [handler req]
-  (let [pipe-in (PipedInputStream. pipe-buffer-size)
-        pipe-out (PipedOutputStream. pipe-in)
-        context-window (or (:biff.datastar/context-window req) default-context-window)
+  (let [context-window (or (:biff.datastar/context-window req) default-context-window)
         rate-limit-fps (or (:biff.datastar/rate-limit-fps req) default-rate-limit-fps)
         min-frame-ms (long (max 1 (Math/round (/ 1000.0 rate-limit-fps))))]
     (when-not (pos? rate-limit-fps)
       (throw (ex-info ":biff.datastar/rate-limit-fps must be positive."
                       {:rate-limit-fps rate-limit-fps})))
-    (future
-      (with-open [raw-out pipe-out
-                  out (BufferedOutputStream. raw-out)
-                  scratch (brotli/byte-array-out-stream)
-                  br (brotli/compress-out-stream scratch :window-size context-window)]
-        (loop [last-body nil
-               last-send-ms 0
-               last-seen-at nil
-               seen-epoch @(:biff.datastar/epoch req)]
-          (let [last-seen-at (or last-seen-at (touch-last-seen! (current-request req)))
-                current-req (current-request req)
-                response (normalize-response (handler current-req))
-                _ (persist-tab-state! current-req response)
-                body (render-body (:body response))
-                now-ms (System/currentTimeMillis)
-                next-send-ms (if (and (not= body last-body) (seq body))
-                               (do
-                                 (when (< (- now-ms last-send-ms) min-frame-ms)
-                                   (Thread/sleep (- min-frame-ms (- now-ms last-send-ms))))
-                                 (.write out (brotli/compress-stream scratch br (patch-elements-event body)))
-                                 (.flush out)
-                                 (System/currentTimeMillis))
-                               last-send-ms)
-                last-body (if (and (not= body last-body) (seq body)) body last-body)
-                seen-epoch @(:biff.datastar/epoch req)
-                keepalive-ms (millis-until-keepalive last-seen-at)
-                seen-epoch (wait-for-update! req seen-epoch keepalive-ms)
-                last-seen-at (if (>= (.toMillis (Duration/between last-seen-at (Instant/now)))
-                                    (.toMillis keepalive-interval))
-                               (touch-last-seen! (current-request req))
-                               last-seen-at)]
-            (recur last-body next-send-ms last-seen-at seen-epoch)))))
-    pipe-in))
+    (ring-io/piped-input-stream
+     (fn [raw-out]
+       (with-open [scratch (brotli/byte-array-out-stream)
+                   br (brotli/compress-out-stream scratch :window-size context-window)]
+         (loop [last-body nil
+                last-send-ms 0
+                last-seen-at nil
+                seen-epoch @(:biff.datastar/epoch req)]
+           (let [last-seen-at (or last-seen-at (touch-last-seen! (current-request req)))
+                 current-req (current-request req)
+                 response (normalize-response (handler current-req))
+                 _ (persist-tab-state! current-req response)
+                 body (render-body (:body response))
+                 now-ms (System/currentTimeMillis)
+                 next-send-ms (if (and (not= body last-body) (seq body))
+                                (do
+                                  (when (< (- now-ms last-send-ms) min-frame-ms)
+                                    (Thread/sleep (- min-frame-ms (- now-ms last-send-ms))))
+                                  (.write raw-out (brotli/compress-stream scratch br (patch-elements-event body)))
+                                  (.flush raw-out)
+                                  (System/currentTimeMillis))
+                                last-send-ms)
+                 last-body (if (and (not= body last-body) (seq body)) body last-body)
+                 seen-epoch @(:biff.datastar/epoch req)
+                 keepalive-ms (millis-until-keepalive last-seen-at)
+                 seen-epoch (wait-for-update! req seen-epoch keepalive-ms)
+                 last-seen-at (if (>= (.toMillis (Duration/between last-seen-at (Instant/now)))
+                                     (.toMillis keepalive-interval))
+                                (touch-last-seen! (current-request req))
+                                last-seen-at)]
+             (recur last-body next-send-ms last-seen-at seen-epoch))))))))
 
 (defn wrap-datastar
   "Ring middleware that attaches tab state and upgrades Datastar SSE GET requests
