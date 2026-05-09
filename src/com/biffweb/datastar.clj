@@ -1,5 +1,6 @@
 (ns com.biffweb.datastar
   (:require
+    [clojure.data.json :as json]
     [clojure.string :as str]
     [clojure.tools.logging :as log]
     [com.biffweb.datastar.impl.brotli :as brotli]
@@ -12,21 +13,22 @@
 (def ^:private heartbeat-interval (Duration/ofMinutes 5))
 (def ^:private default-context-window 18)
 (def ^:private default-rate-limit-ms 15)
+(def ^:private default-datastar-script-url
+  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js")
 (def tab-id-js
   "self.crypto.randomUUID().substring(0,8)")
 
 (defn- js-string [s]
   (pr-str s))
 
-(defn- connection-action [req]
-  (let [headers (cond-> ["'X-Biff-Datastar-Tab-ID': $tabId"]
-                  true
-                  (conj "'X-Biff-Datastar-Page-Request': 'true'")
-                  (:anti-forgery-token req)
-                  (conj (str "'X-CSRF-Token': " (js-string (:anti-forgery-token req)))))
-         options (str "{headers: {" (str/join ", " headers) "}, "
-                      "openWhenHidden: true, "
-                      "retryMaxCount: Infinity}")]
+(defn- headers-expr [fields]
+  (str "({" (str/join ", " fields) "})"))
+
+(def ^:private connection-action
+  (let [headers ["'X-Biff-Datastar-Page-Request': 'true'"]
+        options (str "{headers: " (headers-expr headers) ", "
+                       "openWhenHidden: true, "
+                       "retryMaxCount: Infinity}")]
     ;; The throwaway `u` param keeps this expression valid whether or not the
     ;; page already has its own query string; the backend ignores it.
     (str "@get("
@@ -38,10 +40,75 @@
   "Returns Datastar attributes for the container element that owns the page-level
   SSE connection."
   [req]
-  (let [action (connection-action req)]
+  (let [action connection-action]
     {:data-signals:tab-id tab-id-js
      :data-init action
      :data-on:online__window action}))
+
+(defn configure-csrf
+  "Returns a JS module string that adds the Ring anti-forgery token to Datastar's
+  backend actions."
+  ([csrf-token]
+   (configure-csrf default-datastar-script-url csrf-token))
+  ([datastar-script-url csrf-token]
+   (str "import { action, actions } from "
+        (js-string datastar-script-url)
+        ";\n"
+         "const methods = ['get', 'post', 'put', 'patch', 'delete'];\n"
+          "const originals = Object.fromEntries(methods.map(name => [name, actions[name]]));\n"
+          "const csrfHeader = "
+          (headers-expr [(str "'X-CSRF-Token': " (js-string csrf-token))])
+         ";\n"
+         "const mergeOptions = (options = {}) => ({\n"
+         "  ...options,\n"
+         "  headers: {\n"
+         "    ...csrfHeader,\n"
+         "    ...(options.headers ?? {}),\n"
+         "  },\n"
+         "});\n"
+        "for (const name of methods) {\n"
+        "  const original = originals[name];\n"
+        "  if (!original) continue;\n"
+        "  action({\n"
+        "    name,\n"
+        "    apply(ctx, url, options = {}) {\n"
+        "      return original(ctx, url, mergeOptions(options));\n"
+        "    },\n"
+         "  });\n"
+         "}\n")))
+
+(defn- signal-key [k]
+  (if (or (keyword? k) (string? k) (symbol? k))
+    (keyword (name k))
+    k))
+
+(defn- normalize-signals [signals]
+  (into {}
+        (map (fn [[k v]]
+               [(signal-key k) v]))
+        signals))
+
+(defn- parse-signals [signals]
+  (cond
+    (nil? signals) nil
+    (map? signals) (normalize-signals signals)
+    (string? signals) (when-let [signals (some-> signals str/trim not-empty)]
+                        (json/read-str signals :key-fn keyword))
+    :else
+    (throw (ex-info "Datastar request signals must already be parsed into a map or be provided as a JSON string."
+                    {:signals-type (type signals)}))))
+
+(defn- request-signals [req]
+  (or (get-in req [:params "datastar"])
+      (when (= "true" (get-in req [:headers "datastar-request"]))
+        (or (not-empty (:form-params req))
+            (not-empty (:body-params req))
+            (:params req)))))
+
+(defn- attach-signals [req]
+  (if-some [signals (some-> (request-signals req) parse-signals)]
+    (assoc req :biff.datastar/signals signals)
+    req))
 
 (defn new-lock
   "Creates the lock state expected by `refresh` and `wrap-datastar`."
@@ -97,7 +164,7 @@
     (get-in req [:session :uid])))
 
 (defn- attach-tab-state [req]
-  (let [tab-id (get-in req [:headers "x-biff-datastar-tab-id"])
+  (let [tab-id (get-in req [:biff.datastar/signals :tabId])
         user-id* (user-id req)
         tab-state (read-tab-state req user-id* tab-id)]
     (assoc req
@@ -162,6 +229,7 @@
 
 (defn- current-request [req]
   (-> req
+      attach-signals
       attach-tab-state
       (assoc :biff.datastar/sse-request true)))
 
@@ -220,10 +288,12 @@
    (wrap-datastar handler nil))
   ([handler params]
    (fn [req]
-    (let [req (attach-tab-state (merge req params))]
-      (if (datastar-sse-request? req)
-        (do
-          (when-not (and (:biff.datastar/lock req)
+    (let [req (-> (merge req params)
+                  attach-signals
+                  attach-tab-state)]
+       (if (datastar-sse-request? req)
+         (do
+           (when-not (and (:biff.datastar/lock req)
                          (:biff.datastar/condition req)
                          (:biff.datastar/epoch req))
             (throw (ex-info "Datastar SSE requests require the keys returned by new-lock in the request."
@@ -231,11 +301,11 @@
            {:status 200
             :headers {"Content-Type" "text/event-stream; charset=utf-8"
                       "Cache-Control" "no-store"
-                      "Content-Encoding" "br"}
-            :body (stream-response-body handler req)})
-         (let [response (response-map (handler req))]
-           (persist-tab-state! req response)
-            response))))))
+                       "Content-Encoding" "br"}
+             :body (stream-response-body handler req)})
+          (let [response (response-map (handler req))]
+            (persist-tab-state! req response)
+             response))))))
 
 (defn module
   []
