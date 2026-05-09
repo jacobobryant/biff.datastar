@@ -75,26 +75,30 @@
   (some-> (get-in req [:query-params "channel"])
           trim-to-nil))
 
+(defn- current-tab-state [state req]
+  (when-let [tab-id (:biff.datastar/tab-id req)]
+    (get-in state [:tab-state tab-id])))
+
 (defn- selected-channel-id [channel-id]
   (when (and channel-id (not= channel-id new-channel-option))
     channel-id))
 
-(defn- selected-channel-option [req]
-  (or (trim-to-nil (get-in req [:biff.datastar/tab-state :channel-id]))
-      (query-channel req)
-      "general"))
+(defn- selected-channel-option [req state]
+  (or (trim-to-nil (:channel-id (current-tab-state state req)))
+       (query-channel req)
+       "general"))
 
 (defn- signal-value [req k]
   (some-> (get-in req [:biff.datastar/signals k])
           trim-to-nil))
 
-(defn- current-channel-id [req]
-  (or (selected-channel-id (selected-channel-option req))
-      (selected-channel-id (query-channel req))
-      "general"))
+(defn- current-channel-id [req state]
+  (or (selected-channel-id (selected-channel-option req state))
+       (selected-channel-id (query-channel req))
+       "general"))
 
-(defn- new-channel-selected? [req]
-  (= new-channel-option (selected-channel-option req)))
+(defn- new-channel-selected? [req state]
+  (= new-channel-option (selected-channel-option req state)))
 
 (defn- input-signal [name value]
   {(keyword (str "data-signals:" name "__ifmissing"))
@@ -121,13 +125,8 @@
   (get-in state [:channels channel-id]
           {:id channel-id :name channel-id :messages []}))
 
-(defn- wrap-tab-state [handler]
-  (fn [req]
-    (let [tab-id (:biff.datastar/tab-id req)]
-      (handler (assoc req
-                      :biff.datastar/tab-state
-                      (when tab-id
-                        (get-in @app-state [:tab-state tab-id])))))))
+(defn- channel-exists? [state channel-id]
+  (contains? (:channels state) channel-id))
 
 (defn- page-head [req]
   [:head
@@ -162,28 +161,35 @@ button.secondary { background: #475569; }
 " ]])
 
 (defn- channel-selector [req state]
-  (let [selected-option (selected-channel-option req)]
-      [:div.stack
-        [:form.stack (merge {:data-on:change (post "/channel")}
-                            (input-signal "channelId" selected-option))
-        [:label
+  (let [selected-option (selected-channel-option req state)
+        missing-channel? (and (selected-channel-id selected-option)
+                              (not (channel-exists? state selected-option)))]
+       [:div.stack
+         [:form.stack (merge {:data-on:change (post "/channel")}
+                             (input-signal "channelId" selected-option))
+         [:label
          "Channel"
           [:select {:id "channel-select"
                     :name "channelId"
                     :data-bind:channelId ""}
-          (for [{:keys [id name]} (channels state)]
-            [:option (cond-> {:value id}
-                      (= id selected-option)
-                      (assoc :selected true))
-           name])
-        [:option (cond-> {:value new-channel-option}
-                   (= new-channel-option selected-option)
-                   (assoc :selected true))
-         "new channel..."]]]]
-      (when (new-channel-selected? req)
-         [:form.stack
-          (merge {:data-on:submit (post "/channels")}
-                 (input-signal "newChannelName" ""))
+           (for [{:keys [id name]} (channels state)]
+             [:option (cond-> {:value id}
+                       (= id selected-option)
+                       (assoc :selected true))
+            name])
+          (when missing-channel?
+            [:option {:value selected-option
+                      :selected true
+                      :disabled true}
+             (str selected-option " (not found)")])
+         [:option (cond-> {:value new-channel-option}
+                    (= new-channel-option selected-option)
+                    (assoc :selected true))
+          "new channel..."]]]]
+       (when (new-channel-selected? req state)
+          [:form.stack
+           (merge {:data-on:submit (post "/channels")}
+                  (input-signal "newChannelName" ""))
          [:label
           "Create a channel"
           [:input {:id "new-channel-name"
@@ -193,6 +199,12 @@ button.secondary { background: #475569; }
                    :data-bind:newChannelName ""}]]
         [:div.row
          [:button {:type "submit"} "Create channel"]]])]))
+
+(defn- missing-channel-message [channel-id]
+  [:div.stack
+   [:h2 {:style "margin:0"} "Channel not found"]
+   [:p.muted
+    (str "There isn't a channel named #" channel-id ". Create it from the selector above or pick another channel.")]])
 
 (defn- message-list [state selected-channel]
   (let [{:keys [messages name]} (channel-view state selected-channel)]
@@ -215,13 +227,14 @@ button.secondary { background: #475569; }
             [:p text]])]
         [:p.muted "No messages yet. Say hello."])]]))
 
-(defn- composer [req]
+(defn- composer [channel-id]
   [:form.stack
    (merge {:data-on:submit (post "/messages")}
-           (input-signal "displayName" "Alice")
-           (input-signal "messageText" ""))
-    [:label
-     "Display name"
+            (input-signal "displayName" "Alice")
+            (input-signal "channelId" channel-id)
+            (input-signal "messageText" ""))
+     [:label
+      "Display name"
      [:input {:id "display-name"
               :name "displayName"
               :placeholder "Sprite"
@@ -238,33 +251,28 @@ button.secondary { background: #475569; }
      [:button {:type "submit"} "Send"]]])
 
 (defn- content [req state]
-  (let [selected-channel (current-channel-id req)]
-    [:div#biff-datastar-content.page
-     [:div {:data-init (update-url-init selected-channel)}]
-     [:div.stack
-      [:div.panel.stack
-       [:h1 {:style "margin:0"} "biff.datastar demo chat"]
-        [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
-        (channel-selector req state)]
+  (let [selected-channel (current-channel-id req state)
+        selected-channel-exists? (channel-exists? state selected-channel)]
+     [:div#biff-datastar-content.page
+      [:div {:data-init (update-url-init selected-channel)}]
+      [:div.stack
        [:div.panel.stack
-        (message-list state selected-channel)]
-       [:div.panel
-        (composer req)]]]))
+        [:h1 {:style "margin:0"} "biff.datastar demo chat"]
+         [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
+         (channel-selector req state)]
+        [:div.panel.stack
+         (if selected-channel-exists?
+           (message-list state selected-channel)
+           (missing-channel-message selected-channel))]
+        (when selected-channel-exists?
+          [:div.panel
+           (composer selected-channel)])]]))
 
 (defn- page-response [req]
-  (let [selected-option (selected-channel-option req)
-        channel-id (current-channel-id req)
-        state (swap! app-state
-                     (fn [state]
-                       (-> state
-                           (ensure-channel channel-id)
-                           (update-tab-state (:biff.datastar/tab-id req)
-                                             assoc
-                                             :channel-id
-                                             selected-option))))
-        page-body (if (:biff.datastar/sse-request req)
-                    (content req state)
-                    [chassis/doctype-html5
+   (let [state @app-state
+         page-body (if (:biff.datastar/sse-request req)
+                     (content req state)
+                     [chassis/doctype-html5
                       [:html {:lang "en"}
                        (page-head req)
                         [:body
@@ -295,27 +303,32 @@ button.secondary { background: #475569; }
                                      assoc
                                      :channel-id
                                      channel-id))))
-      (signal-patch-response {"channelid" channel-id
-                              "newchannelname" ""}))
-    {:status 204}))
+       (signal-patch-response {"channelid" channel-id
+                               "newchannelname" ""}))
+     {:status 204}))
 
 (defn- send-message-handler [req]
-  (let [channel-id (current-channel-id req)
-        display-name (signal-value req :displayname)
-        message-text (signal-value req :messagetext)]
-    (if (and display-name message-text)
-      (do
-        (swap! app-state
-               (fn [state]
-                 (update-in (ensure-channel state channel-id)
-                            [:channels channel-id :messages]
-                            conj
-                            {:id (str (UUID/randomUUID))
-                             :display-name display-name
-                             :text message-text
-                             :created-at (Instant/now)})))
-        (signal-patch-response {"messagetext" ""}))
-      {:status 204})))
+   (let [channel-id (signal-value req :channelid)
+         display-name (signal-value req :displayname)
+         message-text (signal-value req :messagetext)
+         message-id (str (UUID/randomUUID))
+         state (if (and channel-id display-name message-text)
+                 (swap! app-state
+                        (fn [state]
+                          (if (channel-exists? state channel-id)
+                            (update-in state
+                                       [:channels channel-id :messages]
+                                       conj
+                                       {:id message-id
+                                        :display-name display-name
+                                        :text message-text
+                                        :created-at (Instant/now)})
+                            state)))
+                 @app-state)]
+     (if (some #(= message-id (:id %))
+               (get-in state [:channels channel-id :messages]))
+       (signal-patch-response {"messagetext" ""})
+       {:status 204})))
 
 (defn- not-found [_]
   {:status 404
@@ -333,10 +346,9 @@ button.secondary { background: #475569; }
 
 (def app-sync
   (-> routes
-      wrap-tab-state
       (biff.datastar/wrap-datastar
-       lock-state)
-        wrap-anti-forgery
+        lock-state)
+         wrap-anti-forgery
         wrap-session
         (wrap-json-params {:keywords? true})
         wrap-params))
