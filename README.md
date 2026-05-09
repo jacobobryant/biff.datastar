@@ -10,7 +10,6 @@ Utilities for building Datastar-driven Ring apps on Biff.
 - `com.biffweb.datastar/refresh`
 - `com.biffweb.datastar/wrap-datastar`
 - `com.biffweb.datastar/module`
-- `com.biffweb.datastar/purge-tab-state!`
 
 `container-opts` opens a long-lived Datastar `@get()` connection to the current page and sends:
 
@@ -35,7 +34,7 @@ Pair `container-opts` with `configure-csrf` to override Datastar's built-in back
   ...]]
 ```
 
-`wrap-datastar` reads the `tabId` signal from Datastar request signals, so the default JSON request mode works without custom tab-id headers. For non-GET Datastar requests, it expects upstream middleware to have already parsed the request body into `:form-params` or `:body-params`.
+`wrap-datastar` reads the `tabId` signal from Datastar request signals and attaches it to the Ring request as `:biff.datastar/tab-id`, so the default JSON request mode works without custom tab-id headers. For non-GET Datastar requests, it expects upstream middleware to have already parsed the request body into `:form-params` or `:body-params`.
 
 ## Demo
 
@@ -45,7 +44,7 @@ Run the demo chat app with:
 clojure -M:dev:demo
 ```
 
-The demo uses Jetty with virtual threads, in-memory state, Datastar-bound form fields, and the same `wrap-datastar` middleware that the library exposes.
+The demo uses Jetty with virtual threads, in-memory state, Datastar-bound form fields, and the same `wrap-datastar` middleware that the library exposes. It persists per-tab UI state in the demo app itself by keying off `:biff.datastar/tab-id`.
 
 ## Tests
 

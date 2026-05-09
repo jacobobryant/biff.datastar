@@ -100,26 +100,34 @@
   {(keyword (str "data-signals:" name "__ifmissing"))
    (if (empty? value) "''" (pr-str value))})
 
-(defn- ensure-channel! [channel-id]
-  (swap! app-state
-         (fn [state]
-           (if (get-in state [:channels channel-id])
-             state
-             (-> state
-                 (assoc-in [:channels channel-id] {:id channel-id
-                                                   :name channel-id
-                                                   :messages []})
-                 (update :channel-order conj channel-id))))))
+(defn- ensure-channel [state channel-id]
+  (if (get-in state [:channels channel-id])
+    state
+    (-> state
+        (assoc-in [:channels channel-id] {:id channel-id
+                                          :name channel-id
+                                          :messages []})
+        (update :channel-order conj channel-id))))
 
-(defn- channels []
-  (mapv #(get-in @app-state [:channels %]) (:channel-order @app-state)))
+(defn- update-tab-state [state tab-id f & args]
+  (if tab-id
+    (apply update-in state [:tab-state tab-id] (fnil f {}) args)
+    state))
 
-(defn- channel-view [channel-id]
-  (get-in @app-state [:channels channel-id]
+(defn- channels [state]
+  (mapv #(get-in state [:channels %]) (:channel-order state)))
+
+(defn- channel-view [state channel-id]
+  (get-in state [:channels channel-id]
           {:id channel-id :name channel-id :messages []}))
 
-(defn- tab-state-key [user-id tab-id]
-  [user-id tab-id])
+(defn- wrap-tab-state [handler]
+  (fn [req]
+    (let [tab-id (:biff.datastar/tab-id req)]
+      (handler (assoc req
+                      :biff.datastar/tab-state
+                      (when tab-id
+                        (get-in @app-state [:tab-state tab-id])))))))
 
 (defn- page-head [req]
   [:head
@@ -153,20 +161,20 @@ button.secondary { background: #475569; }
 .grow { flex: 1 1 18rem; }
 " ]])
 
-(defn- channel-selector [req]
+(defn- channel-selector [req state]
   (let [selected-option (selected-channel-option req)]
-     [:div.stack
-       [:form.stack (merge {:data-on:change (post "/channel")}
-                           (input-signal "channelId" selected-option))
+      [:div.stack
+        [:form.stack (merge {:data-on:change (post "/channel")}
+                            (input-signal "channelId" selected-option))
         [:label
          "Channel"
-         [:select {:id "channel-select"
-                   :name "channelId"
-                   :data-bind:channelId ""}
-         (for [{:keys [id name]} (channels)]
-           [:option (cond-> {:value id}
-                     (= id selected-option)
-                     (assoc :selected true))
+          [:select {:id "channel-select"
+                    :name "channelId"
+                    :data-bind:channelId ""}
+          (for [{:keys [id name]} (channels state)]
+            [:option (cond-> {:value id}
+                      (= id selected-option)
+                      (assoc :selected true))
            name])
         [:option (cond-> {:value new-channel-option}
                    (= new-channel-option selected-option)
@@ -186,8 +194,8 @@ button.secondary { background: #475569; }
         [:div.row
          [:button {:type "submit"} "Create channel"]]])]))
 
-(defn- message-list [selected-channel]
-  (let [{:keys [messages name]} (channel-view selected-channel)]
+(defn- message-list [state selected-channel]
+  (let [{:keys [messages name]} (channel-view state selected-channel)]
     [:div.stack
      [:div.row
       [:h2 {:style "margin:0"} (str "#" name)]
@@ -229,54 +237,66 @@ button.secondary { background: #475569; }
    [:div.row
      [:button {:type "submit"} "Send"]]])
 
-(defn- content [req]
+(defn- content [req state]
   (let [selected-channel (current-channel-id req)]
     [:div#biff-datastar-content.page
      [:div {:data-init (update-url-init selected-channel)}]
      [:div.stack
       [:div.panel.stack
        [:h1 {:style "margin:0"} "biff.datastar demo chat"]
-       [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
-       (channel-selector req)]
-      [:div.panel.stack
-       (message-list selected-channel)]
-      [:div.panel
-       (composer req)]]]))
+        [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
+        (channel-selector req state)]
+       [:div.panel.stack
+        (message-list state selected-channel)]
+       [:div.panel
+        (composer req)]]]))
 
 (defn- page-response [req]
   (let [selected-option (selected-channel-option req)
         channel-id (current-channel-id req)
-        new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id selected-option)
+        state (swap! app-state
+                     (fn [state]
+                       (-> state
+                           (ensure-channel channel-id)
+                           (update-tab-state (:biff.datastar/tab-id req)
+                                             assoc
+                                             :channel-id
+                                             selected-option))))
         page-body (if (:biff.datastar/sse-request req)
-                    (content req)
+                    (content req state)
                     [chassis/doctype-html5
                       [:html {:lang "en"}
                        (page-head req)
-                       [:body
-                        [:div (merge {:class "stack"} (biff.datastar/container-opts req))
-                         (content req)]]]])]
-    (ensure-channel! channel-id)
+                        [:body
+                         [:div (merge {:class "stack"} (biff.datastar/container-opts req))
+                          (content req state)]]]])]
     {:status 200
-     :biff.datastar/tab-state new-tab-state
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (chassis/html page-body)}))
 
 (defn- set-channel-handler [req]
-  (assoc (noop-response)
-         :biff.datastar/tab-state
-         (assoc (or (:biff.datastar/tab-state req) {})
-                 :channel-id
-                 (or (signal-value req :channelid)
-                     "general"))))
+  (swap! app-state
+         update-tab-state
+         (:biff.datastar/tab-id req)
+         assoc
+         :channel-id
+         (or (signal-value req :channelid)
+             "general"))
+  (noop-response))
 
 (defn- create-channel-handler [req]
   (if-let [channel-id (signal-value req :newchannelname)]
     (do
-      (ensure-channel! channel-id)
-      (assoc (signal-patch-response {"channelid" channel-id
-                                     "newchannelname" ""})
-             :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {})
-                                             :channel-id channel-id)))
+      (swap! app-state
+             (fn [state]
+               (-> state
+                   (ensure-channel channel-id)
+                   (update-tab-state (:biff.datastar/tab-id req)
+                                     assoc
+                                     :channel-id
+                                     channel-id))))
+      (signal-patch-response {"channelid" channel-id
+                              "newchannelname" ""}))
     {:status 204}))
 
 (defn- send-message-handler [req]
@@ -285,12 +305,15 @@ button.secondary { background: #475569; }
         message-text (signal-value req :messagetext)]
     (if (and display-name message-text)
       (do
-        (ensure-channel! channel-id)
-        (swap! app-state update-in [:channels channel-id :messages]
-               conj {:id (str (UUID/randomUUID))
-                     :display-name display-name
-                     :text message-text
-                     :created-at (Instant/now)})
+        (swap! app-state
+               (fn [state]
+                 (update-in (ensure-channel state channel-id)
+                            [:channels channel-id :messages]
+                            conj
+                            {:id (str (UUID/randomUUID))
+                             :display-name display-name
+                             :text message-text
+                             :created-at (Instant/now)})))
         (signal-patch-response {"messagetext" ""}))
       {:status 204})))
 
@@ -310,22 +333,13 @@ button.secondary { background: #475569; }
 
 (def app-sync
   (-> routes
+      wrap-tab-state
       (biff.datastar/wrap-datastar
-       (merge lock-state
-              {:biff.datastar/get-user-id (constantly "demo-user")
-                :biff.datastar/get-tab-state (fn [_ user-id tab-id]
-                                               (get-in @app-state [:tab-state (tab-state-key user-id tab-id)]))
-                :biff.datastar/set-tab-state (fn [_ user-id tab-id tab-state]
-                                               (let [path [:tab-state (tab-state-key user-id tab-id)]]
-                                                 (swap! app-state
-                                                        (fn [state]
-                                                           (if tab-state
-                                                             (assoc-in state path tab-state)
-                                                             (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
-       wrap-anti-forgery
-       wrap-session
-       (wrap-json-params {:keywords? true})
-       wrap-params))
+       lock-state)
+        wrap-anti-forgery
+        wrap-session
+        (wrap-json-params {:keywords? true})
+        wrap-params))
 
 (defonce server (atom nil))
 

@@ -45,10 +45,20 @@
          (reset! demo/app-state previous-state)))))
 
 (deftest set-channel-action-uses-empty-204-response
-  (let [response (#'demo/set-channel-handler
-                   {:biff.datastar/signals {:channelid "general"}
-                    :biff.datastar/tab-state {:channel-id "__new__"}})]
-    (is (= 204 (:status response)))
-    (is (nil? (:body response)))
-    (is (= {:channel-id "general"}
-           (:biff.datastar/tab-state response)))))
+  (let [previous-state @demo/app-state]
+    (try
+      (reset! demo/app-state {:channels {"general" {:id "general"
+                                                    :name "general"
+                                                    :messages []}}
+                              :channel-order ["general"]
+                              :tab-state {"tab-1" {:channel-id "__new__"}}})
+      (let [response (#'demo/set-channel-handler
+                      {:biff.datastar/tab-id "tab-1"
+                       :biff.datastar/signals {:channelid "general"}
+                       :biff.datastar/tab-state {:channel-id "__new__"}})]
+        (is (= 204 (:status response)))
+        (is (nil? (:body response)))
+        (is (= "general"
+               (get-in @demo/app-state [:tab-state "tab-1" :channel-id]))))
+      (finally
+        (reset! demo/app-state previous-state)))))
