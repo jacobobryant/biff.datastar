@@ -34,5 +34,14 @@
         (is (str/includes? (:body response) "event: datastar-patch-signals"))
         (is (str/includes? (:body response) (json/write-str {:messageText ""})))
         (is (= 1 (count (get-in @demo/app-state [:channels "general" :messages])))))
-      (finally
-        (reset! demo/app-state previous-state)))))
+       (finally
+         (reset! demo/app-state previous-state)))))
+
+(deftest set-channel-action-uses-empty-204-response
+  (let [response (#'demo/set-channel-handler
+                  {:params {"channelId" "general"}
+                   :biff.datastar/tab-state {:channel-id "__new__"}})]
+    (is (= 204 (:status response)))
+    (is (nil? (:body response)))
+    (is (= {:channel-id "general"}
+           (:biff.datastar/tab-state response)))))

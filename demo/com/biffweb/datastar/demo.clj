@@ -65,10 +65,7 @@
     {:status 204}))
 
 (defn- noop-response []
-  {:status 200
-   :headers {"Cache-Control" "no-store"
-             "Content-Type" "text/event-stream; charset=utf-8"}
-   :body (signal-patch-body {})})
+  {:status 204})
 
 (defn- update-url-init [channel-id]
   (str "window.history.replaceState("
@@ -78,7 +75,7 @@
 
 (defn- trim-to-nil [s]
   (let [s (some-> s str str/trim)]
-    (when (seq s) s)))
+    (not-empty s)))
 
 (defn- query-channel [req]
   (some-> (get-in req [:query-params "channel"])
