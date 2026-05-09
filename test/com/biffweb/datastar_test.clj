@@ -43,18 +43,31 @@
   (let [store (atom {})
         handler (datastar/wrap-datastar
                  (fn [req]
-                    {:status 204
-                     :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
+                     {:status 204
+                      :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
         request (merge (datastar/new-lock)
                        {:request-method :post
                         :headers {"datastar-request" "true"}
-                        :form-params {"tabId" "tab-1"}
+                        :body-params {:tabId "tab-1"}
                         :biff.datastar/get-user-id (constantly "user-1")
                         :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
                         :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
                                                        (swap! store assoc tab-id tab-state))})]
     (handler request)
     (is (= {:channel-id "general"} (@store "tab-1")))))
+
+(deftest wrap-datastar-normalizes-signal-keys
+  (let [handler (datastar/wrap-datastar
+                 (fn [req]
+                   {:status 200
+                    :body (:biff.datastar/signals req)}))
+        response (handler {:request-method :post
+                           :headers {"datastar-request" "true"}
+                           :body-params {"displayname" "Alice"
+                                         :messageText "hello"}})]
+    (is (= {:displayname "Alice"
+            :messageText "hello"}
+           (:body response)))))
 
 (deftest sse-response-streams-initial-patch-and-touches-last-seen
   (let [store (atom {"tab-1" {:channel-id "general"}})

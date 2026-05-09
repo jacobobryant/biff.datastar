@@ -24,7 +24,7 @@
 (defn- headers-expr [fields]
   (str "({" (str/join ", " fields) "})"))
 
-(defn- connection-action [req]
+(def ^:private connection-action
   (let [headers ["'X-Biff-Datastar-Page-Request': 'true'"]
         options (str "{headers: " (headers-expr headers) ", "
                        "openWhenHidden: true, "
@@ -40,7 +40,7 @@
   "Returns Datastar attributes for the container element that owns the page-level
   SSE connection."
   [req]
-  (let [action (connection-action req)]
+  (let [action connection-action]
     {:data-signals:tab-id tab-id-js
      :data-init action
      :data-on:online__window action}))
@@ -77,12 +77,23 @@
          "  });\n"
          "}\n")))
 
+(defn- signal-key [k]
+  (if (or (keyword? k) (string? k) (symbol? k))
+    (keyword (name k))
+    k))
+
+(defn- normalize-signals [signals]
+  (into {}
+        (map (fn [[k v]]
+               [(signal-key k) v]))
+        signals))
+
 (defn- parse-signals [signals]
   (cond
     (nil? signals) nil
-    (map? signals) signals
+    (map? signals) (normalize-signals signals)
     (string? signals) (when-let [signals (some-> signals str/trim not-empty)]
-                        (json/read-str signals))
+                        (json/read-str signals :key-fn keyword))
     :else
     (throw (ex-info "Datastar request signals must already be parsed into a map or be provided as a JSON string."
                     {:signals-type (type signals)}))))
@@ -153,7 +164,7 @@
     (get-in req [:session :uid])))
 
 (defn- attach-tab-state [req]
-  (let [tab-id (get-in req [:biff.datastar/signals "tabId"])
+  (let [tab-id (get-in req [:biff.datastar/signals :tabId])
         user-id* (user-id req)
         tab-state (read-tab-state req user-id* tab-id)]
     (assoc req

@@ -19,13 +19,18 @@ Utilities for building Datastar-driven Ring apps on Biff.
 Pair `container-opts` with `configure-csrf` to override Datastar's built-in backend actions so they include the Ring anti-forgery token:
 
 ```clj
+(:require
+ [com.biffweb.datastar :as biff.datastar]
+ [dev.onionpancakes.chassis.core :as chassis])
+
 [:script {:type "module"
            :src "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"}]
 [:script {:type "module"}
- (datastar/configure-csrf
-  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"
-  (:anti-forgery-token req))]
-[:div (datastar/container-opts req)
+ (chassis/raw
+  (biff.datastar/configure-csrf
+   "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"
+   (:anti-forgery-token req)))]
+[:div (biff.datastar/container-opts req)
  [:form {:data-on:submit "@post('/messages')"}
   ...]]
 ```

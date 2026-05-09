@@ -39,7 +39,7 @@
   (doto (ExecutorThreadPool.)
     (.setVirtualThreadsExecutor (Executors/newVirtualThreadPerTaskExecutor))))
 
-(defn- form-action [path]
+(defn- post [path]
   (str "@post("
        (pr-str path)
        ")"))
@@ -85,14 +85,8 @@
       "general"))
 
 (defn- signal-value [req k]
-  (let [normalize (fn [s]
-                    (some-> s name str/lower-case (str/replace "-" "") (str/replace "_" "")))
-        key* (normalize k)]
-    (some->> (:biff.datastar/signals req)
-             (some (fn [[signal-name value]]
-                     (when (= key* (normalize signal-name))
-                       value)))
-             trim-to-nil)))
+  (some-> (get-in req [:biff.datastar/signals k])
+          trim-to-nil))
 
 (defn- current-channel-id [req]
   (or (selected-channel-id (selected-channel-option req))
@@ -162,7 +156,7 @@ button.secondary { background: #475569; }
 (defn- channel-selector [req]
   (let [selected-option (selected-channel-option req)]
      [:div.stack
-       [:form.stack (merge {:data-on:change (form-action "/channel")}
+       [:form.stack (merge {:data-on:change (post "/channel")}
                            (input-signal "channelId" selected-option))
         [:label
          "Channel"
@@ -180,7 +174,7 @@ button.secondary { background: #475569; }
          "new channel..."]]]]
       (when (new-channel-selected? req)
          [:form.stack
-          (merge {:data-on:submit (form-action "/channels")}
+          (merge {:data-on:submit (post "/channels")}
                  (input-signal "newChannelName" ""))
          [:label
           "Create a channel"
@@ -215,7 +209,7 @@ button.secondary { background: #475569; }
 
 (defn- composer [req]
   [:form.stack
-   (merge {:data-on:submit (form-action "/messages")}
+   (merge {:data-on:submit (post "/messages")}
            (input-signal "displayName" "Alice")
            (input-signal "messageText" ""))
     [:label
@@ -272,11 +266,11 @@ button.secondary { background: #475569; }
          :biff.datastar/tab-state
          (assoc (or (:biff.datastar/tab-state req) {})
                  :channel-id
-                 (or (signal-value req "channelId")
+                 (or (signal-value req :channelid)
                      "general"))))
 
 (defn- create-channel-handler [req]
-  (if-let [channel-id (signal-value req "newChannelName")]
+  (if-let [channel-id (signal-value req :newchannelname)]
     (do
       (ensure-channel! channel-id)
       (assoc (signal-patch-response {"channelid" channel-id
@@ -287,8 +281,8 @@ button.secondary { background: #475569; }
 
 (defn- send-message-handler [req]
   (let [channel-id (current-channel-id req)
-        display-name (signal-value req "displayName")
-        message-text (signal-value req "messageText")]
+        display-name (signal-value req :displayname)
+        message-text (signal-value req :messagetext)]
     (if (and display-name message-text)
       (do
         (ensure-channel! channel-id)
@@ -330,7 +324,7 @@ button.secondary { background: #475569; }
                                                              (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
        wrap-anti-forgery
        wrap-session
-       (wrap-json-params {:keywords? false})
+       (wrap-json-params {:keywords? true})
        wrap-params))
 
 (defonce server (atom nil))

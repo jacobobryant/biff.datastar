@@ -26,15 +26,15 @@
 (deftest send-message-action-clears-message-signal
   (let [previous-state @demo/app-state]
     (try
-      (reset! demo/app-state {:channels {"general" {:id "general"
-                                                    :name "general"
-                                                    :messages []}}
-                              :channel-order ["general"]
-                              :tab-state {}})
-       (let [response (#'demo/send-message-handler
-                       {:biff.datastar/signals {"displayName" "Alice"
-                                                "messageText" "hello"}
-                         :biff.datastar/tab-state {:channel-id "general"}})]
+       (reset! demo/app-state {:channels {"general" {:id "general"
+                                                     :name "general"
+                                                     :messages []}}
+                               :channel-order ["general"]
+                               :tab-state {}})
+        (let [response (#'demo/send-message-handler
+                        {:biff.datastar/signals {:displayname "Alice"
+                                                 :messagetext "hello"}
+                          :biff.datastar/tab-state {:channel-id "general"}})]
         (is (= 200 (:status response)))
         (is (= "text/event-stream; charset=utf-8"
                (get-in response [:headers "Content-Type"])))
@@ -46,7 +46,7 @@
 
 (deftest set-channel-action-uses-empty-204-response
   (let [response (#'demo/set-channel-handler
-                   {:biff.datastar/signals {"channelId" "general"}
+                   {:biff.datastar/signals {:channelid "general"}
                     :biff.datastar/tab-state {:channel-id "__new__"}})]
     (is (= 204 (:status response)))
     (is (nil? (:body response)))
