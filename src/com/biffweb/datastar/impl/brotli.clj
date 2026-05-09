@@ -1,4 +1,4 @@
-(ns com.biffweb.datastar.brotli
+(ns com.biffweb.datastar.impl.brotli
   (:require [clojure.java.io :as io])
   (:import
    (com.aayushatharva.brotli4j Brotli4jLoader)
@@ -21,6 +21,8 @@
 
 (defn compress-out-stream ^BrotliOutputStream
   [^ByteArrayOutputStream out-stream & {:as opts}]
+  ;; Brotli4j's explicit buffer size matches Hyperlith's choice and avoids
+  ;; per-write growth churn while we stream many small SSE frames.
   (BrotliOutputStream. out-stream (encoder-params opts) 16384))
 
 (defn compress-stream [^ByteArrayOutputStream out ^BrotliOutputStream br chunk]

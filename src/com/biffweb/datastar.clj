@@ -1,20 +1,18 @@
 (ns com.biffweb.datastar
   (:require
    [clojure.string :as str]
-   [com.biffweb.datastar.brotli :as brotli]
-   [dev.onionpancakes.chassis.core :as chassis]
+   [clojure.tools.logging :as log]
+   [com.biffweb.datastar.impl.brotli :as brotli]
    [ring.util.io :as ring-io])
   (:import
-   (java.io PipedInputStream)
-   (java.time Duration Instant)
-   (java.util.concurrent TimeUnit)
-   (java.util.concurrent.locks Condition ReentrantLock)))
+    (java.io PipedInputStream)
+    (java.time Duration Instant)
+    (java.util.concurrent TimeUnit)
+    (java.util.concurrent.locks Condition ReentrantLock)))
 
-(def ^:private tab-state-namespace :biff.datastar/tab-state)
-(def ^:private tab-id-header "x-biff-datastar-tab-id")
-(def ^:private keepalive-interval (Duration/ofMinutes 5))
+(def ^:private heartbeat-interval (Duration/ofMinutes 5))
 (def ^:private default-context-window 18)
-(def ^:private default-rate-limit-fps 60)
+(def ^:private default-rate-limit-ms 15)
 (def ^:private pipe-buffer-size 65536)
 
 (def tab-id-js
@@ -25,11 +23,15 @@
 
 (defn- connection-action [req]
   (let [headers (cond-> ["'X-Biff-Datastar-Tab-ID': $tabId"]
+                  true
+                  (conj "'X-Biff-Datastar-Page-Request': 'true'")
                   (:anti-forgery-token req)
                   (conj (str "'X-CSRF-Token': " (js-string (:anti-forgery-token req)))))
-        options (str "{headers: {" (str/join ", " headers) "}, "
-                     "openWhenHidden: true, "
-                     "retryMaxCount: Infinity}")]
+         options (str "{headers: {" (str/join ", " headers) "}, "
+                      "openWhenHidden: true, "
+                      "retryMaxCount: Infinity}")]
+    ;; The throwaway `u` param keeps this expression valid whether or not the
+    ;; page already has its own query string; the backend ignores it.
     (str "@get("
          "window.location.pathname + (window.location.search + '&u=').replace(/^&/,'?'), "
          options
@@ -73,7 +75,7 @@
       ((:biff.datastar/get-tab-state req) req user-id tab-id)
 
       (:biff.db/get-kv req)
-      ((:biff.db/get-kv req) req tab-state-namespace (str user-id ":" tab-id))
+      ((:biff.db/get-kv req) req :biff.datastar/tab-state (str user-id ":" tab-id))
 
       :else
       (throw (ex-info "wrap-datastar requires :biff.datastar/get-tab-state or :biff.db/get-kv when a tab id is present."
@@ -86,7 +88,7 @@
       ((:biff.datastar/set-tab-state req) req user-id tab-id tab-state)
 
       (:biff.db/set-kv req)
-      ((:biff.db/set-kv req) req tab-state-namespace (str user-id ":" tab-id) tab-state)
+      ((:biff.db/set-kv req) req :biff.datastar/tab-state (str user-id ":" tab-id) tab-state)
 
       :else
       (throw (ex-info "wrap-datastar requires :biff.datastar/set-tab-state or :biff.db/set-kv when a tab id is present."
@@ -98,7 +100,7 @@
     (get-in req [:session :uid])))
 
 (defn- attach-tab-state [req]
-  (let [tab-id (get-in req [:headers tab-id-header])
+  (let [tab-id (get-in req [:headers "x-biff-datastar-tab-id"])
         user-id* (user-id req)
         tab-state (read-tab-state req user-id* tab-id)]
     (assoc req
@@ -106,11 +108,11 @@
            :biff.datastar/user-id user-id*
            :biff.datastar/tab-state tab-state)))
 
-(defn- normalize-response [response]
-  (cond
-    (map? response) response
-    (nil? response) {:status 204}
-    :else {:status 200 :body response}))
+(defn- response-map [response]
+  (when-not (map? response)
+    (throw (ex-info "Datastar handlers must return Ring response maps."
+                    {:response response})))
+  response)
 
 (defn- response-tab-state [req response]
   (if (contains? response :biff.datastar/tab-state)
@@ -126,14 +128,7 @@
 
 (defn- datastar-sse-request? [req]
   (and (= :get (:request-method req))
-       (= "true" (get-in req [:headers "datastar-request"]))
-       (str/includes? (str/lower-case (get-in req [:headers "accept"] "")) "text/event-stream")))
-
-(defn- render-body [body]
-  (cond
-    (nil? body) ""
-    (string? body) body
-    :else (chassis/html body)))
+       (= "true" (get-in req [:headers "x-biff-datastar-page-request"]))))
 
 (defn- patch-elements-event [body]
   (str "event: datastar-patch-elements\n"
@@ -153,16 +148,17 @@
     (finally
       (.unlock ^ReentrantLock lock))))
 
-(defn- millis-until-keepalive [last-seen-at]
+(defn- millis-until-heartbeat [last-seen-at]
   (if last-seen-at
     (let [elapsed (.toMillis (Duration/between last-seen-at (Instant/now)))
-          interval (.toMillis keepalive-interval)]
+          interval (.toMillis heartbeat-interval)]
       (max 1 (- interval elapsed)))
-    1))
+    (.toMillis heartbeat-interval)))
 
 (defn- touch-last-seen! [req]
-  (when (:biff.datastar/tab-id req)
-    (let [tab-state (or (:biff.datastar/tab-state req) {})
+  (when (and (:biff.datastar/tab-id req)
+             (:biff.datastar/tab-state req))
+    (let [tab-state (:biff.datastar/tab-state req)
           updated (assoc tab-state :biff.datastar/last-seen (Instant/now))]
       (write-tab-state! req (:biff.datastar/user-id req) (:biff.datastar/tab-id req) updated)
       (:biff.datastar/last-seen updated))))
@@ -174,49 +170,54 @@
 
 (defn- pipe-response-body [handler req]
   (let [context-window (or (:biff.datastar/context-window req) default-context-window)
-        rate-limit-fps (or (:biff.datastar/rate-limit-fps req) default-rate-limit-fps)
-        min-frame-ms (long (max 1 (Math/round (/ 1000.0 rate-limit-fps))))]
-    (when-not (pos? rate-limit-fps)
-      (throw (ex-info ":biff.datastar/rate-limit-fps must be positive."
-                      {:rate-limit-fps rate-limit-fps})))
+        rate-limit-ms (long (or (:biff.datastar/rate-limit-ms req) default-rate-limit-ms))]
+    (when-not (pos? rate-limit-ms)
+      (throw (ex-info ":biff.datastar/rate-limit-ms must be positive."
+                      {:rate-limit-ms rate-limit-ms})))
     (ring-io/piped-input-stream
      (fn [raw-out]
-       (with-open [scratch (brotli/byte-array-out-stream)
-                   br (brotli/compress-out-stream scratch :window-size context-window)]
-         (loop [last-body nil
-                last-send-ms 0
-                last-seen-at nil
-                seen-epoch @(:biff.datastar/epoch req)]
-           (let [last-seen-at (or last-seen-at (touch-last-seen! (current-request req)))
-                 current-req (current-request req)
-                 response (normalize-response (handler current-req))
-                 _ (persist-tab-state! current-req response)
-                 body (render-body (:body response))
-                 now-ms (System/currentTimeMillis)
-                 next-send-ms (if (and (not= body last-body) (seq body))
-                                (do
-                                  (when (< (- now-ms last-send-ms) min-frame-ms)
-                                    (Thread/sleep (- min-frame-ms (- now-ms last-send-ms))))
-                                  (.write raw-out (brotli/compress-stream scratch br (patch-elements-event body)))
-                                  (.flush raw-out)
-                                  (System/currentTimeMillis))
-                                last-send-ms)
-                 last-body (if (and (not= body last-body) (seq body)) body last-body)
-                 seen-epoch @(:biff.datastar/epoch req)
-                 keepalive-ms (millis-until-keepalive last-seen-at)
-                 seen-epoch (wait-for-update! req seen-epoch keepalive-ms)
-                 last-seen-at (if (>= (.toMillis (Duration/between last-seen-at (Instant/now)))
-                                     (.toMillis keepalive-interval))
-                                (touch-last-seen! (current-request req))
-                                last-seen-at)]
-             (recur last-body next-send-ms last-seen-at seen-epoch))))))))
+        (try
+          (with-open [scratch (brotli/byte-array-out-stream)
+                      br (brotli/compress-out-stream scratch :window-size context-window)]
+            (loop [last-body-hash nil
+                   last-seen-at nil
+                   seen-epoch @(:biff.datastar/epoch req)]
+              (let [render-start-ms (System/currentTimeMillis)
+                    current-req (current-request req)
+                    response (response-map (handler current-req))
+                    _ (persist-tab-state! current-req response)
+                    body (or (:body response) "")
+                    body-hash (hash body)
+                    send? (and (seq body) (not= body-hash last-body-hash))
+                    _ (when send?
+                        (.write raw-out (brotli/compress-stream scratch br (patch-elements-event body)))
+                        (.flush raw-out))
+                    last-seen-at (if (or (nil? last-seen-at)
+                                         (>= (.toMillis (Duration/between last-seen-at (Instant/now)))
+                                             (.toMillis heartbeat-interval)))
+                                   (or (touch-last-seen! current-req) last-seen-at)
+                                   last-seen-at)
+                    keepalive-ms (millis-until-heartbeat last-seen-at)
+                    seen-epoch (wait-for-update! req seen-epoch keepalive-ms)
+                    elapsed-ms (- (System/currentTimeMillis) render-start-ms)]
+                (when (< elapsed-ms rate-limit-ms)
+                  (Thread/sleep (- rate-limit-ms elapsed-ms)))
+                (recur (if send? body-hash last-body-hash)
+                       last-seen-at
+                       seen-epoch))))
+          (catch Throwable t
+            (if (= "Pipe closed" (.getMessage t))
+              (log/debug t "Datastar SSE stream closed after the client disconnected.")
+              (log/error t "Datastar SSE loop crashed"))))))))
 
 (defn wrap-datastar
   "Ring middleware that attaches tab state and upgrades Datastar SSE GET requests
   into long-lived compressed event streams."
-  [handler]
-  (fn [req]
-    (let [req (attach-tab-state req)]
+  ([handler]
+   (wrap-datastar handler nil))
+  ([handler params]
+   (fn [req]
+    (let [req (attach-tab-state (merge req params))]
       (if (datastar-sse-request? req)
         (do
           (when-not (and (:biff.datastar/lock req)
@@ -226,12 +227,12 @@
                             {})))
           {:status 200
            :headers {"Content-Type" "text/event-stream; charset=utf-8"
-                     "Cache-Control" "no-store"
-                     "Content-Encoding" "br"}
-           :body (pipe-response-body handler req)})
-        (let [response (normalize-response (handler req))]
+                      "Cache-Control" "no-store"
+                      "Content-Encoding" "br"}
+            :body (pipe-response-body handler req)})
+        (let [response (response-map (handler req))]
           (persist-tab-state! req response)
-          response)))))
+           response))))))
 
 (defn module
   []
@@ -244,10 +245,10 @@
   (when-not (and get-kv set-kv list-kv)
     (throw (ex-info "purge-tab-state! requires :biff.db/get-kv, :biff.db/set-kv, and :biff.db/list-kv."
                     {})))
-  (doseq [key (list-kv ctx tab-state-namespace nil)]
-    (let [tab-state (get-kv ctx tab-state-namespace key)
+  (doseq [key (list-kv ctx :biff.datastar/tab-state nil)]
+    (let [tab-state (get-kv ctx :biff.datastar/tab-state key)
           last-seen (:biff.datastar/last-seen tab-state)]
       (when (or (nil? last-seen)
                 (.isBefore ^Instant last-seen ^Instant last-seen-before))
-        (set-kv ctx tab-state-namespace key nil))))
+        (set-kv ctx :biff.datastar/tab-state key nil))))
   nil)

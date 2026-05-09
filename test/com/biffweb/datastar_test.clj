@@ -3,7 +3,7 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [com.biffweb.datastar :as datastar]
-   [com.biffweb.datastar.brotli :as brotli]))
+   [com.biffweb.datastar.impl.brotli :as brotli]))
 
 (defn- wait-for [pred]
   (loop [remaining 100]
@@ -18,6 +18,7 @@
     (is (= datastar/tab-id-js (:data-signals:tab-id opts)))
     (is (str/includes? (:data-init opts) "@get("))
     (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Tab-ID': $tabId"))
+    (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Page-Request': 'true'"))
     (is (str/includes? (:data-init opts) "'X-CSRF-Token': \"csrf-token\""))))
 
 (deftest refresh-bumps-epoch
@@ -43,7 +44,7 @@
     (is (= {:channel-id "general"} (@store "tab-1")))))
 
 (deftest sse-response-streams-initial-patch-and-touches-last-seen
-  (let [store (atom {})
+  (let [store (atom {"tab-1" {:channel-id "general"}})
         rendered (atom "<div id=\"biff_datastar_content\">Hello</div>")
         handler (datastar/wrap-datastar
                  (fn [req]
@@ -53,6 +54,7 @@
         request (merge (datastar/new-lock)
                        {:request-method :get
                         :headers {"x-biff-datastar-tab-id" "tab-1"
+                                  "x-biff-datastar-page-request" "true"
                                   "accept" "text/event-stream"
                                   "datastar-request" "true"}
                         :biff.datastar/get-user-id (constantly "user-1")

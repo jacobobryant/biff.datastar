@@ -1,13 +1,14 @@
 (ns com.biffweb.datastar.demo
   (:require
-   [clojure.data.json :as json]
-   [clojure.string :as str]
-   [com.biffweb.datastar :as datastar]
-   [dev.onionpancakes.chassis.core :as chassis]
-   [ring.middleware.anti-forgery :refer [wrap-anti-forgery]]
-   [ring.middleware.params :refer [wrap-params]]
-   [ring.middleware.session :refer [wrap-session]]
-   [ring.util.jakarta.servlet :as servlet])
+    [clojure.data.json :as json]
+    [clojure.string :as str]
+    [clojure.tools.logging :as log]
+    [com.biffweb.datastar :as datastar]
+    [dev.onionpancakes.chassis.core :as chassis]
+    [ring.middleware.anti-forgery :refer [wrap-anti-forgery]]
+    [ring.middleware.params :refer [wrap-params]]
+    [ring.middleware.session :refer [wrap-session]]
+    [ring.util.jakarta.servlet :as servlet])
   (:import
     (java.io InputStream)
     (java.time Instant)
@@ -22,7 +23,8 @@
   (atom {:channels {"general" {:id "general"
                                :name "general"
                                :messages []}}
-         :channel-order ["general"]}))
+         :channel-order ["general"]
+         :tab-state {}}))
 
 (defonce lock-state
   (datastar/new-lock))
@@ -35,7 +37,7 @@
 (add-watch app-state ::refresh
             (fn [_ _ old-state new-state]
               (when-not (= old-state new-state)
-                (datastar/refresh lock-state))))
+                (future (datastar/refresh lock-state)))))
 
 (defn- vthread-pool []
   (doto (ExecutorThreadPool.)
@@ -51,9 +53,17 @@
        method
        "("
        (pr-str path)
-       ", {headers: "
-       (csrf-headers-js req)
-       "})"))
+        ", {headers: "
+        (csrf-headers-js req)
+        "})"))
+
+(defn- signal-patch-response
+  ([]
+   (signal-patch-response {}))
+  ([signals]
+   {:status 200
+    :headers {"Content-Type" "application/json; charset=utf-8"}
+    :body (json/write-str signals)}))
 
 (defn- update-url-js [signal-name]
   (str "window.history.replaceState("
@@ -103,6 +113,9 @@
   (get-in @app-state [:channels channel-id]
           {:id channel-id :name channel-id :messages []}))
 
+(defn- tab-state-key [user-id tab-id]
+  [user-id tab-id])
+
 (defn- page-head [req]
   [:head
    [:meta {:charset "utf-8"}]
@@ -119,7 +132,7 @@ body { font-family: system-ui, sans-serif; margin: 0; background: #f5f7fb; color
 .controls { display: grid; gap: 0.75rem; }
 .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
 label { display: grid; gap: 0.35rem; font-size: 0.95rem; font-weight: 600; }
-input, select, textarea, button { font: inherit; }
+ input, select, textarea, button { font: inherit; box-sizing: border-box; }
 input, select, textarea { width: 100%; padding: 0.7rem 0.85rem; border: 1px solid #cbd5e1; border-radius: 10px; background: white; }
 textarea { min-height: 7rem; resize: vertical; }
 button { border: 0; border-radius: 10px; background: #2563eb; color: white; padding: 0.75rem 1rem; cursor: pointer; }
@@ -176,12 +189,13 @@ button.secondary { background: #475569; }
       [:h2 {:style "margin:0"} (str "#" name)]
       [:div.muted (str (count messages) " messages")]]
      [:div#messages.messages
-      {:data-signals:messages-at-bottom__ifmissing "true"
-       :data-on:scroll "$messagesAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 8"
-       :data-effect "$messagesAtBottom && (el.scrollTop = el.scrollHeight)"}
-      (if (seq messages)
-        [:div.message-list
-         (for [{:keys [id display-name text created-at]} messages]
+       {:data-signals:message-count (str (count messages))
+        :data-signals:messages-at-bottom__ifmissing "true"
+        :data-on:scroll "$messagesAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 8"
+        :data-effect "$messageCount, $messagesAtBottom && requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; })"}
+       (if (seq messages)
+         [:div.message-list
+          (for [{:keys [id display-name text created-at]} messages]
            [:article.message {:id (str "message-" id)}
             [:header
              [:strong display-name]
@@ -190,36 +204,34 @@ button.secondary { background: #475569; }
         [:p.muted "No messages yet. Say hello."])]]))
 
 (defn- composer [req]
-  [:div.stack {:data-signals:display-name__ifmissing (pr-str "Sprite")
-               :data-signals:message-text__ifmissing "''"}
+  [:form.stack {:data-on:submit (action "post" "/messages" req)
+                :data-signals:display-name__ifmissing (pr-str "Alice")
+                :data-signals:message-text__ifmissing "''"}
    [:label
-    "Display name"
-    [:input {:id "display-name"
-              :placeholder "Sprite"
-              :data-bind:display-name ""}]]
+     "Display name"
+     [:input {:id "display-name"
+               :placeholder "Sprite"
+               :required true
+               :data-bind:display-name ""}]]
    [:label
-    "Message"
-    [:textarea {:id "message-text"
-                 :placeholder "Type a message..."
-                 :data-bind:message-text ""}]]
-    [:div.row
-     [:button {:type "button"
-               :data-on:click (str "if($messageText.trim() !== ''){"
-                                   (action "post" "/messages" req)
-                                   ";"
-                                   "$messageText = '';"
-                                   "}")} "Send"]]])
+     "Message"
+     [:textarea {:id "message-text"
+                  :placeholder "Type a message..."
+                  :required true
+                  :data-bind:message-text ""}]]
+   [:div.row
+    [:button {:type "submit"} "Send"]]])
 
 (defn- content [req]
   (let [selected-channel (current-channel-id req)]
-    [:div#biff_datastar_content.page
+    [:div#biff-datastar-content.page
       [:div.stack
        [:div.panel.stack
         [:h1 {:style "margin:0"} "biff.datastar demo chat"]
-       [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state."]
-       (channel-selector req selected-channel)]
-      [:div.panel.stack
-       (message-list selected-channel)]
+        [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
+        (channel-selector req selected-channel)]
+       [:div.panel.stack
+        (message-list selected-channel)]
       [:div.panel
        (composer req)]]]))
 
@@ -230,40 +242,32 @@ button.secondary { background: #475569; }
     {:status 200
      :biff.datastar/tab-state new-tab-state
      :headers {"Content-Type" "text/html; charset=utf-8"}
-     :body (if (:biff.datastar/sse-request req)
+     :body (chassis/html
+            (if (:biff.datastar/sse-request req)
               (content req)
-              (chassis/html
-                [chassis/doctype-html5
-                 [:html {:lang "en"}
-                  (page-head req)
-                  [:body
-                   [:div (merge {:class "stack"} (datastar/container-opts req))]
-                   (content req)]]]))}))
+              [chassis/doctype-html5
+               [:html {:lang "en"}
+                (page-head req)
+                [:body
+                 [:div (merge {:class "stack"} (datastar/container-opts req))]
+                 (content req)]]]))}))
 
-(defn- persist-tab-state! [req tab-state]
-  (when-let [set-tab-state (:biff.datastar/set-tab-state req)]
-    (set-tab-state req
-                   (:biff.datastar/user-id req)
-                   (:biff.datastar/tab-id req)
-                   tab-state)))
-
-(defn- channel-handler [req]
+(defn- set-channel-handler [req]
   (let [channel-id (selected-channel-id (trim-to-nil (:channelId (datastar-signals req))))
-         new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)]
-    (when channel-id
-      (persist-tab-state! req new-tab-state)
-      (datastar/refresh req))
-    {:status 204}))
+        new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)]
+    (if channel-id
+      {:status 204
+       :biff.datastar/tab-state new-tab-state}
+      {:status 204})))
 
 (defn- create-channel-handler [req]
   (let [channel-id (trim-to-nil (:newChannelName (datastar-signals req)))]
     (if channel-id
       (do
-        (persist-tab-state! req (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id))
         (ensure-channel! channel-id)
-        (datastar/refresh req)
-        {:status 204})
-      {:status 204})))
+        {:status 204
+         :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)})
+      (signal-patch-response))))
 
 (defn- send-message-handler [req]
   (let [{:keys [displayName messageText channelId]} (datastar-signals req)
@@ -275,40 +279,41 @@ button.secondary { background: #475569; }
       (do
         (ensure-channel! channel-id)
          (swap! app-state update-in [:channels channel-id :messages]
-                conj {:id (str (UUID/randomUUID))
-                      :display-name display-name
-                      :text message-text
-                      :created-at (Instant/now)})
-         {:status 204})
-       {:status 204})))
+                 conj {:id (str (UUID/randomUUID))
+                       :display-name display-name
+                       :text message-text
+                       :created-at (Instant/now)})
+          (signal-patch-response {:messageText ""}))
+        (signal-patch-response))))
 
 (defn- not-found [_]
   {:status 404
    :headers {"Content-Type" "text/plain; charset=utf-8"}
    :body "not found"})
 
-(defn- wrap-demo-context [handler]
-  (fn [req]
-    (handler (merge req lock-state
-                    {:biff.datastar/get-user-id (constantly "demo-user")
-                     :biff.datastar/get-tab-state (fn [_ _ tab-id]
-                                                    (get-in @app-state [:tab-state tab-id]))
-                     :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
-                                                    (swap! app-state assoc-in [:tab-state tab-id] tab-state))}))))
-
 (defn- routes [req]
   (case [(:request-method req) (:uri req)]
     [:get "/"] (page-response req)
     [:head "/"] (page-response req)
-    [:post "/channel"] (channel-handler req)
-    [:post "/channels"] (create-channel-handler req)
-    [:post "/messages"] (send-message-handler req)
-    (not-found req)))
+     [:post "/channel"] (set-channel-handler req)
+     [:post "/channels"] (create-channel-handler req)
+     [:post "/messages"] (send-message-handler req)
+     (not-found req)))
 
 (def app-sync
   (-> routes
-      datastar/wrap-datastar
-      wrap-demo-context
+      (datastar/wrap-datastar
+       (merge lock-state
+              {:biff.datastar/get-user-id (constantly "demo-user")
+               :biff.datastar/get-tab-state (fn [_ user-id tab-id]
+                                              (get-in @app-state [:tab-state (tab-state-key user-id tab-id)]))
+               :biff.datastar/set-tab-state (fn [_ user-id tab-id tab-state]
+                                              (let [path [:tab-state (tab-state-key user-id tab-id)]]
+                                                (swap! app-state
+                                                       (fn [state]
+                                                         (if tab-state
+                                                           (assoc-in state path tab-state)
+                                                           (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
       wrap-anti-forgery
       wrap-session
       wrap-params))
@@ -344,12 +349,17 @@ button.secondary { background: #475569; }
                          (.flush out)
                          (recur))))))
                (catch Throwable t
-                 (try
-                   (.sendError servlet-response 500 (.getMessage t))
-                   (catch Exception _))
-                 (raise t))
+                 (if (.isCommitted servlet-response)
+                   (log/debug t "Datastar SSE stream ended after the client closed the connection.")
+                   (do
+                     (try
+                       (.sendError servlet-response 500 (.getMessage t))
+                       (catch Exception _))
+                     (raise t))))
                (finally
-                 (.complete (.getAsyncContext servlet-request)))))
+                 (try
+                   (.complete (.getAsyncContext servlet-request))
+                   (catch IllegalStateException _)))))
            (respond response-map)))
        (catch Throwable t
          (raise t))))))
@@ -357,6 +367,8 @@ button.secondary { background: #475569; }
 (defonce server (atom nil))
 
 (defn start! []
+  (when-let [server* @server]
+    (.stop server*))
   (let [server* (Server. (vthread-pool))
         connector (doto (ServerConnector. server*)
                     (.setPort 8080))
