@@ -2,21 +2,16 @@
   (:require
     [clojure.data.json :as json]
     [clojure.string :as str]
-    [clojure.tools.logging :as log]
     [com.biffweb.datastar :as datastar]
     [dev.onionpancakes.chassis.core :as chassis]
+    [ring.adapter.jetty :as ring-jetty]
     [ring.middleware.anti-forgery :refer [wrap-anti-forgery]]
     [ring.middleware.params :refer [wrap-params]]
-    [ring.middleware.session :refer [wrap-session]]
-    [ring.util.jakarta.servlet :as servlet])
+    [ring.middleware.session :refer [wrap-session]])
   (:import
-    (java.io InputStream)
     (java.time Instant)
     (java.util UUID)
     (java.util.concurrent Executors)
-    (jakarta.servlet.http HttpServletRequest HttpServletResponse)
-    (org.eclipse.jetty.ee9.servlet ServletContextHandler ServletHolder)
-    (org.eclipse.jetty.server Server ServerConnector)
     (org.eclipse.jetty.util.thread ExecutorThreadPool)))
 
 (defonce app-state
@@ -48,35 +43,38 @@
        (pr-str (:anti-forgery-token req))
        ", 'X-Biff-Datastar-Tab-ID': $tabId}"))
 
-(defn- action [method path req]
-  (str "@"
-       method
-       "("
+(defn- form-action [path req]
+  (str "@post("
        (pr-str path)
-        ", {headers: "
-        (csrf-headers-js req)
-        "})"))
+       ", {contentType: 'form', headers: "
+       (csrf-headers-js req)
+       "})"))
 
-(defn- signal-patch-response
-  ([]
-   (signal-patch-response {}))
-  ([signals]
-   {:status 200
-    :headers {"Content-Type" "application/json; charset=utf-8"}
-    :body (json/write-str signals)}))
+(defn- signal-patch-body [signals]
+  (str "event: datastar-patch-signals\n"
+       "data: signals "
+       (json/write-str signals)
+       "\n\n"))
 
-(defn- update-url-js [signal-name]
+(defn- signal-patch-response [signals]
+  (if (seq signals)
+    {:status 200
+     :headers {"Cache-Control" "no-store"
+               "Content-Type" "text/event-stream; charset=utf-8"}
+     :body (signal-patch-body signals)}
+    {:status 204}))
+
+(defn- noop-response []
+  {:status 200
+   :headers {"Cache-Control" "no-store"
+             "Content-Type" "text/event-stream; charset=utf-8"}
+   :body (signal-patch-body {})})
+
+(defn- update-url-init [channel-id]
   (str "window.history.replaceState("
-       "null, '', '?channel=' + encodeURIComponent($" signal-name "));"))
-
-(defn- parse-json-body [req]
-  (if (instance? InputStream (:body req))
-    (json/read-str (slurp (:body req)) :key-fn keyword)
-    {}))
-
-(defn- datastar-signals [req]
-  (let [body (parse-json-body req)]
-    (or (:datastar body) body {})))
+       "null, '', '?channel=' + encodeURIComponent("
+       (pr-str channel-id)
+       "));el.remove()"))
 
 (defn- trim-to-nil [s]
   (let [s (some-> s str str/trim)]
@@ -90,10 +88,22 @@
   (when (and channel-id (not= channel-id new-channel-option))
     channel-id))
 
+(defn- selected-channel-option [req]
+  (or (trim-to-nil (get-in req [:biff.datastar/tab-state :channel-id]))
+      (query-channel req)
+      "general"))
+
 (defn- current-channel-id [req]
-  (or (selected-channel-id (get-in req [:biff.datastar/tab-state :channel-id]))
+  (or (selected-channel-id (selected-channel-option req))
       (selected-channel-id (query-channel req))
       "general"))
+
+(defn- new-channel-selected? [req]
+  (= new-channel-option (selected-channel-option req)))
+
+(defn- input-signal [name value]
+  {(keyword (str "data-signals:" name "__ifmissing"))
+   (if (empty? value) "''" (pr-str value))})
 
 (defn- ensure-channel! [channel-id]
   (swap! app-state
@@ -146,41 +156,36 @@ button.secondary { background: #475569; }
 .grow { flex: 1 1 18rem; }
 " ]])
 
-(defn- channel-selector [req selected-channel]
-  [:div.stack {:data-signals:channel-id__ifmissing (pr-str selected-channel)
-               :data-signals:new-channel-name__ifmissing "''"}
-   [:label
-    "Channel"
-    [:select {:id "channel-select"
-              :data-bind:channel-id ""
-              :data-on:change (str "const showNewChannel = $channelId === '__new__';"
-                                   "document.getElementById('new-channel-form').style.display = showNewChannel ? '' : 'none';"
-                                   "if(!showNewChannel){"
-                                   (action "post" "/channel" req)
-                                   ";"
-                                   (update-url-js "channelId")
-                                   "}") }
-      (for [{:keys [id name]} (channels)]
-        [:option {:value id} name])
-      [:option {:value new-channel-option} "new channel..."]]]
-    [:div.stack {:id "new-channel-form"
-                 :style "display:none"}
-     [:label
-      "Create a channel"
-      [:input {:id "new-channel-name"
-               :placeholder "team-updates"
-               :data-bind:new-channel-name ""}]]
-     [:div.row
-      [:button {:type "button"
-                :data-on:click (str "const channelId = $newChannelName.trim();"
-                                    "if(channelId !== ''){"
-                                    "$channelId = channelId;"
-                                    (action "post" "/channels" req)
-                                    ";"
-                                    "window.history.replaceState(null, '', '?channel=' + encodeURIComponent(channelId));"
-                                    "$newChannelName = '';"
-                                    "document.getElementById('new-channel-form').style.display = 'none';"
-                                    "}")} "Create channel"]]]])
+(defn- channel-selector [req]
+  (let [selected-option (selected-channel-option req)]
+    [:div.stack
+     [:form.stack {:data-on:change (form-action "/channel" req)}
+      [:label
+       "Channel"
+       [:select {:id "channel-select"
+                 :name "channelId"}
+        (for [{:keys [id name]} (channels)]
+          [:option (cond-> {:value id}
+                     (= id selected-option)
+                     (assoc :selected true))
+           name])
+        [:option (cond-> {:value new-channel-option}
+                   (= new-channel-option selected-option)
+                   (assoc :selected true))
+         "new channel..."]]]]
+     (when (new-channel-selected? req)
+       [:form.stack
+        (merge {:data-on:submit (form-action "/channels" req)}
+               (input-signal "new-channel-name" ""))
+        [:label
+         "Create a channel"
+         [:input {:id "new-channel-name"
+                  :name "newChannelName"
+                  :placeholder "team-updates"
+                  :required true
+                  :data-bind:new-channel-name ""}]]
+        [:div.row
+         [:button {:type "submit"} "Create channel"]]])]))
 
 (defn- message-list [selected-channel]
   (let [{:keys [messages name]} (channel-view selected-channel)]
@@ -204,87 +209,90 @@ button.secondary { background: #475569; }
         [:p.muted "No messages yet. Say hello."])]]))
 
 (defn- composer [req]
-  [:form.stack {:data-on:submit (action "post" "/messages" req)
-                :data-signals:display-name__ifmissing (pr-str "Alice")
-                :data-signals:message-text__ifmissing "''"}
+  [:form.stack
+   (merge {:data-on:submit (form-action "/messages" req)}
+          (input-signal "display-name" "Alice")
+          (input-signal "message-text" ""))
    [:label
-     "Display name"
-     [:input {:id "display-name"
-               :placeholder "Sprite"
-               :required true
-               :data-bind:display-name ""}]]
+    "Display name"
+    [:input {:id "display-name"
+             :name "displayName"
+             :placeholder "Sprite"
+             :required true
+             :data-bind:display-name ""}]]
    [:label
-     "Message"
-     [:textarea {:id "message-text"
-                  :placeholder "Type a message..."
-                  :required true
-                  :data-bind:message-text ""}]]
+    "Message"
+    [:textarea {:id "message-text"
+                :name "messageText"
+                :placeholder "Type a message..."
+                :required true
+                :data-bind:message-text ""}]]
    [:div.row
-    [:button {:type "submit"} "Send"]]])
+     [:button {:type "submit"} "Send"]]])
 
 (defn- content [req]
   (let [selected-channel (current-channel-id req)]
     [:div#biff-datastar-content.page
-      [:div.stack
-       [:div.panel.stack
-        [:h1 {:style "margin:0"} "biff.datastar demo chat"]
-        [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
-        (channel-selector req selected-channel)]
-       [:div.panel.stack
-        (message-list selected-channel)]
+     [:div {:data-init (update-url-init selected-channel)}]
+     [:div.stack
+      [:div.panel.stack
+       [:h1 {:style "margin:0"} "biff.datastar demo chat"]
+       [:p.muted {:style "margin:0"} "One page, live updates, and per-tab channel state. Booyah."]
+       (channel-selector req)]
+      [:div.panel.stack
+       (message-list selected-channel)]
       [:div.panel
        (composer req)]]]))
 
 (defn- page-response [req]
-  (let [channel-id (current-channel-id req)
-        new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)]
+  (let [selected-option (selected-channel-option req)
+        channel-id (current-channel-id req)
+        new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id selected-option)
+        page-body (if (:biff.datastar/sse-request req)
+                    (content req)
+                    [chassis/doctype-html5
+                     [:html {:lang "en"}
+                      (page-head req)
+                      [:body
+                       [:div (merge {:class "stack"} (datastar/container-opts req))
+                        (content req)]]]])]
     (ensure-channel! channel-id)
     {:status 200
      :biff.datastar/tab-state new-tab-state
      :headers {"Content-Type" "text/html; charset=utf-8"}
-     :body (chassis/html
-            (if (:biff.datastar/sse-request req)
-              (content req)
-              [chassis/doctype-html5
-               [:html {:lang "en"}
-                (page-head req)
-                [:body
-                 [:div (merge {:class "stack"} (datastar/container-opts req))]
-                 (content req)]]]))}))
+     :body (chassis/html page-body)}))
 
 (defn- set-channel-handler [req]
-  (let [channel-id (selected-channel-id (trim-to-nil (:channelId (datastar-signals req))))
-        new-tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)]
-    (if channel-id
-      {:status 204
-       :biff.datastar/tab-state new-tab-state}
-      {:status 204})))
+  (assoc (noop-response)
+         :biff.datastar/tab-state
+         (assoc (or (:biff.datastar/tab-state req) {})
+                :channel-id
+                (or (trim-to-nil (get-in req [:params "channelId"]))
+                    "general"))))
 
 (defn- create-channel-handler [req]
-  (let [channel-id (trim-to-nil (:newChannelName (datastar-signals req)))]
-    (if channel-id
-      (do
-        (ensure-channel! channel-id)
-        {:status 204
-         :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id channel-id)})
-      (signal-patch-response))))
+  (if-let [channel-id (trim-to-nil (get-in req [:params "newChannelName"]))]
+    (do
+      (ensure-channel! channel-id)
+      (assoc (signal-patch-response {:newChannelName ""})
+             :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {})
+                                             :channel-id channel-id)))
+    {:status 204}))
 
 (defn- send-message-handler [req]
-  (let [{:keys [displayName messageText channelId]} (datastar-signals req)
-        channel-id (or (selected-channel-id (trim-to-nil channelId))
-                       (current-channel-id req))
-        display-name (or (trim-to-nil displayName) "Anonymous")
-        message-text (trim-to-nil messageText)]
-    (if (and channel-id message-text)
+  (let [channel-id (current-channel-id req)
+        display-name (trim-to-nil (get-in req [:params "displayName"]))
+        message-text (trim-to-nil (get-in req [:params "messageText"]))]
+    (if (and display-name message-text)
       (do
         (ensure-channel! channel-id)
-         (swap! app-state update-in [:channels channel-id :messages]
-                 conj {:id (str (UUID/randomUUID))
-                       :display-name display-name
-                       :text message-text
-                       :created-at (Instant/now)})
-          (signal-patch-response {:messageText ""}))
-        (signal-patch-response))))
+        (swap! app-state update-in [:channels channel-id :messages]
+               conj {:id (str (UUID/randomUUID))
+                     :display-name display-name
+                     :text message-text
+                     :created-at (Instant/now)})
+        (signal-patch-response {:messageText ""}))
+      {:status 204})))
 
 (defn- not-found [_]
   {:status 404
@@ -315,70 +323,19 @@ button.secondary { background: #475569; }
                                                            (assoc-in state path tab-state)
                                                            (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
       wrap-anti-forgery
-      wrap-session
-      wrap-params))
-
-(defn app
-  ([req]
-   (app-sync req))
-  ([req respond raise]
-   (future
-     (try
-       (let [response-map (app-sync req)]
-         (if (and (:servlet-request req)
-                  (instance? InputStream (:body response-map)))
-           (let [servlet-request ^HttpServletRequest (:servlet-request req)
-                 servlet-response ^HttpServletResponse (:servlet-response req)]
-             (try
-               (when-let [status (:status response-map)]
-                 (.setStatus servlet-response status))
-               (doseq [[header value] (:headers response-map)]
-                 (if (string? value)
-                   (.setHeader servlet-response header value)
-                   (doseq [item value]
-                     (.addHeader servlet-response header item))))
-               (when-let [content-type (get-in response-map [:headers "Content-Type"])]
-                 (.setContentType servlet-response content-type))
-               (with-open [body ^InputStream (:body response-map)
-                           out (.getOutputStream servlet-response)]
-                 (let [buf (byte-array 8192)]
-                   (loop []
-                     (let [read (.read body buf)]
-                       (when (pos? read)
-                         (.write out buf 0 read)
-                         (.flush out)
-                         (recur))))))
-               (catch Throwable t
-                 (if (.isCommitted servlet-response)
-                   (log/debug t "Datastar SSE stream ended after the client closed the connection.")
-                   (do
-                     (try
-                       (.sendError servlet-response 500 (.getMessage t))
-                       (catch Exception _))
-                     (raise t))))
-               (finally
-                 (try
-                   (.complete (.getAsyncContext servlet-request))
-                   (catch IllegalStateException _)))))
-           (respond response-map)))
-       (catch Throwable t
-         (raise t))))))
+       wrap-session
+       wrap-params))
 
 (defonce server (atom nil))
 
 (defn start! []
   (when-let [server* @server]
     (.stop server*))
-  (let [server* (Server. (vthread-pool))
-        connector (doto (ServerConnector. server*)
-                    (.setPort 8080))
-        handler (doto (ServletContextHandler.)
-                  (.setAllowNullPathInfo true)
-                  (.addServlet (ServletHolder. (servlet/servlet #'app {:async? true})) "/*"))]
-    (.addConnector server* connector)
-    (.setHandler server* handler)
-    (.start server*)
-    (reset! server server*))
+  (reset! server
+          (ring-jetty/run-jetty app-sync
+                                {:join? false
+                                 :port 8080
+                                 :thread-pool (vthread-pool)}))
   @server)
 
 (defn stop! []

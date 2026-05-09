@@ -1,9 +1,12 @@
 (ns com.biffweb.datastar-test
   (:require
-   [clojure.string :as str]
-   [clojure.test :refer [deftest is testing]]
-   [com.biffweb.datastar :as datastar]
-   [com.biffweb.datastar.impl.brotli :as brotli]))
+    [clojure.string :as str]
+    [clojure.test :refer [deftest is testing]]
+    [com.biffweb.datastar :as datastar]
+    [com.biffweb.datastar.impl.brotli :as brotli]
+    [ring.core.protocols :as rp])
+  (:import
+    (java.io PipedInputStream PipedOutputStream)))
 
 (defn- wait-for [pred]
   (loop [remaining 100]
@@ -45,7 +48,7 @@
 
 (deftest sse-response-streams-initial-patch-and-touches-last-seen
   (let [store (atom {"tab-1" {:channel-id "general"}})
-        rendered (atom "<div id=\"biff_datastar_content\">Hello</div>")
+        rendered (atom "<div id=\"biff-datastar-content\">Hello</div>")
         handler (datastar/wrap-datastar
                  (fn [req]
                    {:status 200
@@ -61,13 +64,21 @@
                         :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
                         :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
                                                        (swap! store assoc tab-id tab-state))})
-        response (handler request)
-        body (:body response)]
+         response (handler request)
+         body (:body response)]
     (is (= 200 (:status response)))
     (is (= "br" (get-in response [:headers "Content-Encoding"])))
-    (is (wait-for #(contains? (get @store "tab-1") :biff.datastar/last-seen)))
-    (is (wait-for #(pos? (.available body))))
-    (let [buf (byte-array (.available body))]
-      (.read body buf)
-      (is (str/includes? (brotli/decompress-stream buf) "event: datastar-patch-elements")))
-    (.close body)))
+    (let [out (PipedOutputStream.)
+          in (PipedInputStream. out 65536)
+          writer (future (rp/write-body-to-stream body nil out))]
+      (try
+        (is (wait-for #(contains? (get @store "tab-1") :biff.datastar/last-seen)))
+        (is (wait-for #(pos? (.available in))))
+        (let [buf (byte-array (.available in))]
+          (.read in buf)
+          (is (str/includes? (brotli/decompress-stream buf) "event: datastar-patch-elements")))
+        (finally
+          (datastar/refresh request)
+          (.close in)
+          (.close out)
+          (future-cancel writer))))))

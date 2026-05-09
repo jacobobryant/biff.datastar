@@ -1,11 +1,10 @@
 (ns com.biffweb.datastar
   (:require
-   [clojure.string :as str]
-   [clojure.tools.logging :as log]
-   [com.biffweb.datastar.impl.brotli :as brotli]
-   [ring.util.io :as ring-io])
+    [clojure.string :as str]
+    [clojure.tools.logging :as log]
+    [com.biffweb.datastar.impl.brotli :as brotli]
+    [ring.core.protocols :as rp])
   (:import
-    (java.io PipedInputStream)
     (java.time Duration Instant)
     (java.util.concurrent TimeUnit)
     (java.util.concurrent.locks Condition ReentrantLock)))
@@ -13,8 +12,6 @@
 (def ^:private heartbeat-interval (Duration/ofMinutes 5))
 (def ^:private default-context-window 18)
 (def ^:private default-rate-limit-ms 15)
-(def ^:private pipe-buffer-size 65536)
-
 (def tab-id-js
   "self.crypto.randomUUID().substring(0,8)")
 
@@ -168,14 +165,19 @@
       attach-tab-state
       (assoc :biff.datastar/sse-request true)))
 
-(defn- pipe-response-body [handler req]
+(defrecord ^:private StreamResponse [write-fn]
+  rp/StreamableResponseBody
+  (write-body-to-stream [_ _ output-stream]
+    (write-fn output-stream)))
+
+(defn- stream-response-body [handler req]
   (let [context-window (or (:biff.datastar/context-window req) default-context-window)
         rate-limit-ms (long (or (:biff.datastar/rate-limit-ms req) default-rate-limit-ms))]
     (when-not (pos? rate-limit-ms)
       (throw (ex-info ":biff.datastar/rate-limit-ms must be positive."
                       {:rate-limit-ms rate-limit-ms})))
-    (ring-io/piped-input-stream
-     (fn [raw-out]
+    (->StreamResponse
+      (fn [raw-out]
         (try
           (with-open [scratch (brotli/byte-array-out-stream)
                       br (brotli/compress-out-stream scratch :window-size context-window)]
@@ -185,13 +187,13 @@
               (let [render-start-ms (System/currentTimeMillis)
                     current-req (current-request req)
                     response (response-map (handler current-req))
-                    _ (persist-tab-state! current-req response)
                     body (or (:body response) "")
                     body-hash (hash body)
                     send? (and (seq body) (not= body-hash last-body-hash))
                     _ (when send?
                         (.write raw-out (brotli/compress-stream scratch br (patch-elements-event body)))
                         (.flush raw-out))
+                    _ (persist-tab-state! current-req response)
                     last-seen-at (if (or (nil? last-seen-at)
                                          (>= (.toMillis (Duration/between last-seen-at (Instant/now)))
                                              (.toMillis heartbeat-interval)))
@@ -206,7 +208,8 @@
                        last-seen-at
                        seen-epoch))))
           (catch Throwable t
-            (if (= "Pipe closed" (.getMessage t))
+            (if (or (instance? InterruptedException t)
+                    (= "Pipe closed" (.getMessage t)))
               (log/debug t "Datastar SSE stream closed after the client disconnected.")
               (log/error t "Datastar SSE loop crashed"))))))))
 
@@ -225,14 +228,14 @@
                          (:biff.datastar/epoch req))
             (throw (ex-info "Datastar SSE requests require the keys returned by new-lock in the request."
                             {})))
-          {:status 200
-           :headers {"Content-Type" "text/event-stream; charset=utf-8"
+           {:status 200
+            :headers {"Content-Type" "text/event-stream; charset=utf-8"
                       "Cache-Control" "no-store"
                       "Content-Encoding" "br"}
-            :body (pipe-response-body handler req)})
-        (let [response (response-map (handler req))]
-          (persist-tab-state! req response)
-           response))))))
+            :body (stream-response-body handler req)})
+         (let [response (response-map (handler req))]
+           (persist-tab-state! req response)
+            response))))))
 
 (defn module
   []

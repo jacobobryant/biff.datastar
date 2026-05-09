@@ -21,9 +21,8 @@
 
 (defn compress-out-stream ^BrotliOutputStream
   [^ByteArrayOutputStream out-stream & {:as opts}]
-  ;; Brotli4j's explicit buffer size matches Hyperlith's choice and avoids
-  ;; per-write growth churn while we stream many small SSE frames.
-  (BrotliOutputStream. out-stream (encoder-params opts) 16384))
+  (let [buffer-size 16384] ; copied from Hyperlith
+    (BrotliOutputStream. out-stream (encoder-params opts) buffer-size)))
 
 (defn compress-stream [^ByteArrayOutputStream out ^BrotliOutputStream br chunk]
   (doto br

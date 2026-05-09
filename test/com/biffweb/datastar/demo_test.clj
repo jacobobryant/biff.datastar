@@ -1,15 +1,15 @@
 (ns com.biffweb.datastar.demo-test
   (:require
-   [clojure.data.json :as json]
-   [clojure.string :as str]
-   [clojure.test :refer [deftest is]]
+    [clojure.data.json :as json]
+    [clojure.string :as str]
+    [clojure.test :refer [deftest is]]
    [com.biffweb.datastar.demo :as demo]))
 
 (deftest demo-page-uses-published-datastar-bundle
-  (let [response (demo/app {:request-method :get
-                            :uri "/"
-                            :headers {}
-                            :query-params {}})
+  (let [response (demo/app-sync {:request-method :get
+                                 :uri "/"
+                                 :headers {}
+                                 :query-params {}})
         body (:body response)]
     (is (= 200 (:status response)))
     (is (str/includes? body demo/datastar-script-url))
@@ -25,14 +25,14 @@
                               :channel-order ["general"]
                               :tab-state {}})
       (let [response (#'demo/send-message-handler
-                      {:body (java.io.ByteArrayInputStream.
-                              (.getBytes (json/write-str {:displayName "Alice"
-                                                          :messageText "hello"
-                                                          :channelId "general"})
-                                         "UTF-8"))
-                       :biff.datastar/tab-state {:channel-id "general"}})]
+                      {:params {"displayName" "Alice"
+                                "messageText" "hello"}
+                        :biff.datastar/tab-state {:channel-id "general"}})]
         (is (= 200 (:status response)))
-        (is (= {:messageText ""} (json/read-str (:body response) :key-fn keyword)))
+        (is (= "text/event-stream; charset=utf-8"
+               (get-in response [:headers "Content-Type"])))
+        (is (str/includes? (:body response) "event: datastar-patch-signals"))
+        (is (str/includes? (:body response) (json/write-str {:messageText ""})))
         (is (= 1 (count (get-in @demo/app-state [:channels "general" :messages])))))
       (finally
         (reset! demo/app-state previous-state)))))
