@@ -5,7 +5,7 @@ Utilities for building Datastar-driven Ring apps on Biff.
 ## Public API
 
 - `com.biffweb.datastar/container-opts`
-- `com.biffweb.datastar/default-action-headers-script`
+- `com.biffweb.datastar/configure-csrf`
 - `com.biffweb.datastar/new-lock`
 - `com.biffweb.datastar/refresh`
 - `com.biffweb.datastar/wrap-datastar`
@@ -14,21 +14,24 @@ Utilities for building Datastar-driven Ring apps on Biff.
 
 `container-opts` opens a long-lived Datastar `@get()` connection to the current page and sends:
 
-- `X-Biff-Datastar-Tab-ID` on the SSE request
+- the `tabId` signal on the SSE request
 - `X-CSRF-Token` when `:anti-forgery-token` is present on the Ring request
 
-`container-opts` also publishes a `biffDatastarRequestHeaders` page signal with those default headers. Pair it with `default-action-headers-script` to override Datastar's built-in `@get`, `@post`, `@put`, `@patch`, and `@delete` actions so they merge those page-level headers automatically:
+Pair `container-opts` with `configure-csrf` to override Datastar's built-in `@post`, `@put`, `@patch`, and `@delete` actions so they include the Ring anti-forgery token while leaving `@get` alone:
 
 ```clj
 [:script {:type "module"
-          :src "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"}]
+           :src "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"}]
 [:script {:type "module"}
- (datastar/default-action-headers-script
-  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js")]
+ (datastar/configure-csrf
+  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"
+  (:anti-forgery-token req))]
 [:div (datastar/container-opts req)
- [:form {:data-on:submit "@post('/messages', {contentType: 'form'})"}
+ [:form {:data-on:submit "@post('/messages')"}
   ...]]
 ```
+
+`wrap-datastar` reads the `tabId` signal from Datastar request signals, so the default JSON request mode works without custom tab-id headers.
 
 ## Demo
 

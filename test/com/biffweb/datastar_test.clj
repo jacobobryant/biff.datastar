@@ -19,23 +19,19 @@
 (deftest container-opts-include-headers
   (let [opts (datastar/container-opts {:anti-forgery-token "csrf-token"})]
     (is (= datastar/tab-id-js (:data-signals:tab-id opts)))
-    (is (str/includes? (:data-signals:biff-datastar-request-headers opts)
-                       "'X-Biff-Datastar-Tab-ID': $tabId"))
-    (is (str/includes? (:data-signals:biff-datastar-request-headers opts)
-                       "'X-CSRF-Token': \"csrf-token\""))
     (is (str/includes? (:data-init opts) "@get("))
-    (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Tab-ID': $tabId"))
     (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Page-Request': 'true'"))
     (is (str/includes? (:data-init opts) "'X-CSRF-Token': \"csrf-token\""))))
 
-(deftest default-action-headers-script-wraps-fetch-actions
-  (let [script (datastar/default-action-headers-script "https://example.test/datastar.js")]
+(deftest configure-csrf-wraps-non-get-actions
+  (let [script (datastar/configure-csrf "https://example.test/datastar.js" "csrf-token")
+        default-script (datastar/configure-csrf "csrf-token")]
     (is (str/includes? script "import { action, actions, root } from \"https://example.test/datastar.js\";"))
-    (is (str/includes? script "root.biffDatastarRequestHeaders"))
-    (is (str/includes? script "const methods = ['get', 'post', 'put', 'patch', 'delete'];"))
+    (is (str/includes? script "const methods = ['post', 'put', 'patch', 'delete'];"))
     (is (str/includes? script "headers: {"))
-    (is (str/includes? script "...defaultHeaders()"))
-    (is (str/includes? script "...(options.headers ?? {})"))))
+    (is (str/includes? script "'X-CSRF-Token': \"csrf-token\""))
+    (is (str/includes? script "...(options.headers ?? {})"))
+    (is (str/includes? default-script "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"))))
 
 (deftest refresh-bumps-epoch
   (let [lock-state (datastar/new-lock)]
@@ -47,11 +43,13 @@
   (let [store (atom {})
         handler (datastar/wrap-datastar
                  (fn [req]
-                   {:status 204
-                    :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
+                    {:status 204
+                     :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
         request (merge (datastar/new-lock)
                        {:request-method :post
-                        :headers {"x-biff-datastar-tab-id" "tab-1"}
+                        :headers {"content-type" "application/json"
+                                  "datastar-request" "true"}
+                        :body "{\"tabId\":\"tab-1\"}"
                         :biff.datastar/get-user-id (constantly "user-1")
                         :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
                         :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]
@@ -64,15 +62,15 @@
         rendered (atom "<div id=\"biff-datastar-content\">Hello</div>")
         handler (datastar/wrap-datastar
                  (fn [req]
-                   {:status 200
-                    :body @rendered
-                    :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
+                    {:status 200
+                     :body @rendered
+                     :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {}) :channel-id "general")}))
         request (merge (datastar/new-lock)
                        {:request-method :get
-                        :headers {"x-biff-datastar-tab-id" "tab-1"
-                                  "x-biff-datastar-page-request" "true"
+                        :headers {"x-biff-datastar-page-request" "true"
                                   "accept" "text/event-stream"
                                   "datastar-request" "true"}
+                        :params {"datastar" "{\"tabId\":\"tab-1\"}"}
                         :biff.datastar/get-user-id (constantly "user-1")
                         :biff.datastar/get-tab-state (fn [_ _ tab-id] (get @store tab-id))
                         :biff.datastar/set-tab-state (fn [_ _ tab-id tab-state]

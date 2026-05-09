@@ -2,7 +2,7 @@
   (:require
     [clojure.data.json :as json]
     [clojure.string :as str]
-    [com.biffweb.datastar :as datastar]
+    [com.biffweb.datastar :as biff.datastar]
     [dev.onionpancakes.chassis.core :as chassis]
     [ring.adapter.jetty :as ring-jetty]
     [ring.middleware.anti-forgery :refer [wrap-anti-forgery]]
@@ -22,7 +22,7 @@
          :tab-state {}}))
 
 (defonce lock-state
-  (datastar/new-lock))
+  (biff.datastar/new-lock))
 
 (def datastar-script-url
   "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js")
@@ -32,7 +32,7 @@
 (add-watch app-state ::refresh
             (fn [_ _ old-state new-state]
               (when-not (= old-state new-state)
-                (future (datastar/refresh lock-state)))))
+                (future (biff.datastar/refresh lock-state)))))
 
 (defn- vthread-pool []
   (doto (ExecutorThreadPool.)
@@ -41,7 +41,7 @@
 (defn- form-action [path]
   (str "@post("
        (pr-str path)
-       ", {contentType: 'form'})"))
+       ")"))
 
 (defn- signal-patch-body [signals]
   (str "event: datastar-patch-signals\n"
@@ -83,6 +83,9 @@
       (query-channel req)
       "general"))
 
+(defn- signal-value [req k]
+  (trim-to-nil (get-in req [:biff.datastar/signals k])))
+
 (defn- current-channel-id [req]
   (or (selected-channel-id (selected-channel-option req))
       (selected-channel-id (query-channel req))
@@ -119,13 +122,13 @@
 (defn- page-head [req]
   [:head
    [:meta {:charset "utf-8"}]
-   [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
+    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
    [:meta {:name "csrf-token" :content (:anti-forgery-token req)}]
-    [:script {:type "module"
-              :src datastar-script-url}]
-    [:script {:type "module"}
-     (datastar/default-action-headers-script datastar-script-url)]
-    [:title "biff.datastar demo"]
+   [:script {:type "module"
+             :src datastar-script-url}]
+   [:script {:type "module"}
+    (chassis/raw (biff.datastar/configure-csrf datastar-script-url (:anti-forgery-token req)))]
+   [:title "biff.datastar demo"]
    [:style "
 body { font-family: system-ui, sans-serif; margin: 0; background: #f5f7fb; color: #1f2937; }
 .page { max-width: 960px; margin: 0 auto; padding: 2rem 1rem 3rem; }
@@ -151,13 +154,15 @@ button.secondary { background: #475569; }
 (defn- channel-selector [req]
   (let [selected-option (selected-channel-option req)]
      [:div.stack
-      [:form.stack {:data-on:change (form-action "/channel")}
+      [:form.stack (merge {:data-on:change (form-action "/channel")}
+                          (input-signal "channel-id" selected-option))
        [:label
         "Channel"
-       [:select {:id "channel-select"
-                 :name "channelId"}
-        (for [{:keys [id name]} (channels)]
-          [:option (cond-> {:value id}
+        [:select {:id "channel-select"
+                  :name "channelId"
+                  :data-bind:channel-id ""}
+         (for [{:keys [id name]} (channels)]
+           [:option (cond-> {:value id}
                      (= id selected-option)
                      (assoc :selected true))
            name])
@@ -243,11 +248,11 @@ button.secondary { background: #475569; }
         page-body (if (:biff.datastar/sse-request req)
                     (content req)
                     [chassis/doctype-html5
-                     [:html {:lang "en"}
-                      (page-head req)
-                      [:body
-                       [:div (merge {:class "stack"} (datastar/container-opts req))
-                        (content req)]]]])]
+                      [:html {:lang "en"}
+                       (page-head req)
+                       [:body
+                        [:div (merge {:class "stack"} (biff.datastar/container-opts req))
+                         (content req)]]]])]
     (ensure-channel! channel-id)
     {:status 200
      :biff.datastar/tab-state new-tab-state
@@ -258,23 +263,28 @@ button.secondary { background: #475569; }
   (assoc (noop-response)
          :biff.datastar/tab-state
          (assoc (or (:biff.datastar/tab-state req) {})
-                :channel-id
-                (or (trim-to-nil (get-in req [:params "channelId"]))
-                    "general"))))
+                 :channel-id
+                 (or (signal-value req "channelId")
+                     (trim-to-nil (get-in req [:params "channelId"]))
+                     "general"))))
 
 (defn- create-channel-handler [req]
-  (if-let [channel-id (trim-to-nil (get-in req [:params "newChannelName"]))]
+  (if-let [channel-id (or (signal-value req "newChannelName")
+                          (trim-to-nil (get-in req [:params "newChannelName"])))]
     (do
       (ensure-channel! channel-id)
-      (assoc (signal-patch-response {:newChannelName ""})
+      (assoc (signal-patch-response {:channelId channel-id
+                                     :newChannelName ""})
              :biff.datastar/tab-state (assoc (or (:biff.datastar/tab-state req) {})
                                              :channel-id channel-id)))
     {:status 204}))
 
 (defn- send-message-handler [req]
   (let [channel-id (current-channel-id req)
-        display-name (trim-to-nil (get-in req [:params "displayName"]))
-        message-text (trim-to-nil (get-in req [:params "messageText"]))]
+        display-name (or (signal-value req "displayName")
+                         (trim-to-nil (get-in req [:params "displayName"])))
+        message-text (or (signal-value req "messageText")
+                         (trim-to-nil (get-in req [:params "messageText"])))]
     (if (and display-name message-text)
       (do
         (ensure-channel! channel-id)
@@ -302,18 +312,18 @@ button.secondary { background: #475569; }
 
 (def app-sync
   (-> routes
-      (datastar/wrap-datastar
+      (biff.datastar/wrap-datastar
        (merge lock-state
               {:biff.datastar/get-user-id (constantly "demo-user")
-               :biff.datastar/get-tab-state (fn [_ user-id tab-id]
-                                              (get-in @app-state [:tab-state (tab-state-key user-id tab-id)]))
-               :biff.datastar/set-tab-state (fn [_ user-id tab-id tab-state]
-                                              (let [path [:tab-state (tab-state-key user-id tab-id)]]
+                :biff.datastar/get-tab-state (fn [_ user-id tab-id]
+                                               (get-in @app-state [:tab-state (tab-state-key user-id tab-id)]))
+                :biff.datastar/set-tab-state (fn [_ user-id tab-id tab-state]
+                                               (let [path [:tab-state (tab-state-key user-id tab-id)]]
                                                 (swap! app-state
                                                        (fn [state]
-                                                         (if tab-state
-                                                           (assoc-in state path tab-state)
-                                                           (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
+                                                          (if tab-state
+                                                            (assoc-in state path tab-state)
+                                                            (update state :tab-state dissoc (tab-state-key user-id tab-id))))))) }))
       wrap-anti-forgery
        wrap-session
        wrap-params))
