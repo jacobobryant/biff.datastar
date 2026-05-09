@@ -19,10 +19,23 @@
 (deftest container-opts-include-headers
   (let [opts (datastar/container-opts {:anti-forgery-token "csrf-token"})]
     (is (= datastar/tab-id-js (:data-signals:tab-id opts)))
+    (is (str/includes? (:data-signals:biff-datastar-request-headers opts)
+                       "'X-Biff-Datastar-Tab-ID': $tabId"))
+    (is (str/includes? (:data-signals:biff-datastar-request-headers opts)
+                       "'X-CSRF-Token': \"csrf-token\""))
     (is (str/includes? (:data-init opts) "@get("))
     (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Tab-ID': $tabId"))
     (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Page-Request': 'true'"))
     (is (str/includes? (:data-init opts) "'X-CSRF-Token': \"csrf-token\""))))
+
+(deftest default-action-headers-script-wraps-fetch-actions
+  (let [script (datastar/default-action-headers-script "https://example.test/datastar.js")]
+    (is (str/includes? script "import { action, actions, root } from \"https://example.test/datastar.js\";"))
+    (is (str/includes? script "root.biffDatastarRequestHeaders"))
+    (is (str/includes? script "const methods = ['get', 'post', 'put', 'patch', 'delete'];"))
+    (is (str/includes? script "headers: {"))
+    (is (str/includes? script "...defaultHeaders()"))
+    (is (str/includes? script "...(options.headers ?? {})"))))
 
 (deftest refresh-bumps-epoch
   (let [lock-state (datastar/new-lock)]

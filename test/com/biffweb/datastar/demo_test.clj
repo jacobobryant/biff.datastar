@@ -13,8 +13,12 @@
         body (:body response)]
     (is (= 200 (:status response)))
     (is (str/includes? body demo/datastar-script-url))
+    (is (str/includes? body "root.biffDatastarRequestHeaders"))
+    (is (str/includes? body "data-signals:biff-datastar-request-headers"))
     (is (str/includes? body "data-signals:message-count"))
-    (is (str/includes? body "requestAnimationFrame(() =&gt; { el.scrollTop = el.scrollHeight; })"))))
+    (is (str/includes? body "requestAnimationFrame(() =&gt; { el.scrollTop = el.scrollHeight; })"))
+    (is (str/includes? body "@post(&quot;/messages&quot;, {contentType: &apos;form&apos;})"))
+    (is (not (str/includes? body "@post(&quot;/messages&quot;, {contentType: &apos;form&apos;, headers: ")))))
 
 (deftest send-message-action-clears-message-signal
   (let [previous-state @demo/app-state]

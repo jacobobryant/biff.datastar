@@ -38,17 +38,10 @@
   (doto (ExecutorThreadPool.)
     (.setVirtualThreadsExecutor (Executors/newVirtualThreadPerTaskExecutor))))
 
-(defn- csrf-headers-js [req]
-  (str "{'X-CSRF-Token': "
-       (pr-str (:anti-forgery-token req))
-       ", 'X-Biff-Datastar-Tab-ID': $tabId}"))
-
-(defn- form-action [path req]
+(defn- form-action [path]
   (str "@post("
        (pr-str path)
-       ", {contentType: 'form', headers: "
-       (csrf-headers-js req)
-       "})"))
+       ", {contentType: 'form'})"))
 
 (defn- signal-patch-body [signals]
   (str "event: datastar-patch-signals\n"
@@ -128,9 +121,11 @@
    [:meta {:charset "utf-8"}]
    [:meta {:name "viewport" :content "width=device-width, initial-scale=1"}]
    [:meta {:name "csrf-token" :content (:anti-forgery-token req)}]
-   [:script {:type "module"
-             :src datastar-script-url}]
-   [:title "biff.datastar demo"]
+    [:script {:type "module"
+              :src datastar-script-url}]
+    [:script {:type "module"}
+     (datastar/default-action-headers-script datastar-script-url)]
+    [:title "biff.datastar demo"]
    [:style "
 body { font-family: system-ui, sans-serif; margin: 0; background: #f5f7fb; color: #1f2937; }
 .page { max-width: 960px; margin: 0 auto; padding: 2rem 1rem 3rem; }
@@ -155,10 +150,10 @@ button.secondary { background: #475569; }
 
 (defn- channel-selector [req]
   (let [selected-option (selected-channel-option req)]
-    [:div.stack
-     [:form.stack {:data-on:change (form-action "/channel" req)}
-      [:label
-       "Channel"
+     [:div.stack
+      [:form.stack {:data-on:change (form-action "/channel")}
+       [:label
+        "Channel"
        [:select {:id "channel-select"
                  :name "channelId"}
         (for [{:keys [id name]} (channels)]
@@ -170,10 +165,10 @@ button.secondary { background: #475569; }
                    (= new-channel-option selected-option)
                    (assoc :selected true))
          "new channel..."]]]]
-     (when (new-channel-selected? req)
-       [:form.stack
-        (merge {:data-on:submit (form-action "/channels" req)}
-               (input-signal "new-channel-name" ""))
+      (when (new-channel-selected? req)
+        [:form.stack
+         (merge {:data-on:submit (form-action "/channels")}
+                (input-signal "new-channel-name" ""))
         [:label
          "Create a channel"
          [:input {:id "new-channel-name"
@@ -207,7 +202,7 @@ button.secondary { background: #475569; }
 
 (defn- composer [req]
   [:form.stack
-   (merge {:data-on:submit (form-action "/messages" req)}
+   (merge {:data-on:submit (form-action "/messages")}
           (input-signal "display-name" "Alice")
           (input-signal "message-text" ""))
    [:label

@@ -12,21 +12,28 @@
 (def ^:private heartbeat-interval (Duration/ofMinutes 5))
 (def ^:private default-context-window 18)
 (def ^:private default-rate-limit-ms 15)
+(def ^:private default-datastar-script-url
+  "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js")
 (def tab-id-js
   "self.crypto.randomUUID().substring(0,8)")
 
 (defn- js-string [s]
   (pr-str s))
 
+(defn- request-header-fields [req]
+  (cond-> ["'X-Biff-Datastar-Tab-ID': $tabId"]
+    (:anti-forgery-token req)
+    (conj (str "'X-CSRF-Token': " (js-string (:anti-forgery-token req))))))
+
+(defn- headers-expr [fields]
+  (str "({" (str/join ", " fields) "})"))
+
 (defn- connection-action [req]
-  (let [headers (cond-> ["'X-Biff-Datastar-Tab-ID': $tabId"]
-                  true
-                  (conj "'X-Biff-Datastar-Page-Request': 'true'")
-                  (:anti-forgery-token req)
-                  (conj (str "'X-CSRF-Token': " (js-string (:anti-forgery-token req)))))
-         options (str "{headers: {" (str/join ", " headers) "}, "
-                      "openWhenHidden: true, "
-                      "retryMaxCount: Infinity}")]
+  (let [headers (conj (request-header-fields req)
+                      "'X-Biff-Datastar-Page-Request': 'true'")
+        options (str "{headers: " (headers-expr headers) ", "
+                       "openWhenHidden: true, "
+                       "retryMaxCount: Infinity}")]
     ;; The throwaway `u` param keeps this expression valid whether or not the
     ;; page already has its own query string; the backend ignores it.
     (str "@get("
@@ -40,8 +47,38 @@
   [req]
   (let [action (connection-action req)]
     {:data-signals:tab-id tab-id-js
+     :data-signals:biff-datastar-request-headers (headers-expr (request-header-fields req))
      :data-init action
      :data-on:online__window action}))
+
+(defn default-action-headers-script
+  "Returns a JS module string that overrides Datastar's built-in backend actions
+  to merge page-level `biffDatastarRequestHeaders` into every request."
+  ([] (default-action-headers-script default-datastar-script-url))
+  ([datastar-script-url]
+   (str "import { action, actions, root } from "
+        (js-string datastar-script-url)
+        ";\n"
+        "const methods = ['get', 'post', 'put', 'patch', 'delete'];\n"
+        "const originals = Object.fromEntries(methods.map(name => [name, actions[name]]));\n"
+        "const defaultHeaders = () => root.biffDatastarRequestHeaders ?? {};\n"
+        "const mergeOptions = (options = {}) => ({\n"
+        "  ...options,\n"
+        "  headers: {\n"
+        "    ...defaultHeaders(),\n"
+        "    ...(options.headers ?? {}),\n"
+        "  },\n"
+        "});\n"
+        "for (const name of methods) {\n"
+        "  const original = originals[name];\n"
+        "  if (!original) continue;\n"
+        "  action({\n"
+        "    name,\n"
+        "    apply(ctx, url, options = {}) {\n"
+        "      return original(ctx, url, mergeOptions(options));\n"
+        "    },\n"
+        "  });\n"
+        "}\n")))
 
 (defn new-lock
   "Creates the lock state expected by `refresh` and `wrap-datastar`."
