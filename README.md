@@ -1,4 +1,4 @@
-# biff.datastar
+# biff.datastar (alpha/wip/ai generated)
 
 Utilities for building Datastar-driven Ring apps on Biff.
 
