@@ -276,8 +276,8 @@ button.secondary { background: #475569; }
                       [:html {:lang "en"}
                        (page-head req)
                         [:body
-                         [:div (merge {:class "stack"} (biff.datastar/container-opts req))
-                          (content req state)]]]])]
+                         [:div (merge {:class "stack"} biff.datastar/init-opts)
+                           (content req state)]]]])]
     {:status 200
      :headers {"Content-Type" "text/html; charset=utf-8"}
      :body (chassis/html page-body)}))

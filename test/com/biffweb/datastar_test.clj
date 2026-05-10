@@ -16,8 +16,8 @@
         (Thread/sleep 20)
         (recur (dec remaining))))))
 
-(deftest container-opts-include-page-request-header
-  (let [opts (datastar/container-opts {:anti-forgery-token "csrf-token"})]
+(deftest init-opts-include-page-request-header
+  (let [opts datastar/init-opts]
     (is (= datastar/tab-id-js (:data-signals:tab-id opts)))
     (is (str/includes? (:data-init opts) "@get("))
     (is (str/includes? (:data-init opts) "'X-Biff-Datastar-Page-Request': 'true'"))
