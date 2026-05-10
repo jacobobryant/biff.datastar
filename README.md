@@ -4,18 +4,18 @@ Utilities for building Datastar-driven Ring apps on Biff.
 
 ## Public API
 
-- `com.biffweb.datastar/container-opts`
+- `com.biffweb.datastar/init-opts`
 - `com.biffweb.datastar/configure-csrf`
 - `com.biffweb.datastar/new-lock`
 - `com.biffweb.datastar/refresh`
 - `com.biffweb.datastar/wrap-datastar`
 - `com.biffweb.datastar/module`
 
-`container-opts` opens a long-lived Datastar `@get()` connection to the current page and sends:
+`init-opts` opens a long-lived Datastar `@get()` connection to the current page and sends:
 
 - the `tabId` signal on the SSE request
 
-Pair `container-opts` with `configure-csrf` to override Datastar's built-in backend actions so they include the Ring anti-forgery token:
+Pair `init-opts` with `configure-csrf` to override Datastar's built-in backend actions so they include the Ring anti-forgery token:
 
 ```clj
 (:require
@@ -29,7 +29,7 @@ Pair `container-opts` with `configure-csrf` to override Datastar's built-in back
   (biff.datastar/configure-csrf
    "https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.1/bundles/datastar.js"
    (:anti-forgery-token req)))]
-[:div (biff.datastar/container-opts req)
+[:div biff.datastar/init-opts
  [:form {:data-on:submit "@post('/messages')"}
   ...]]
 ```

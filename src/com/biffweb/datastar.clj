@@ -36,10 +36,8 @@
          options
          ")")))
 
-(defn container-opts
-  "Returns Datastar attributes for the container element that owns the page-level
-  SSE connection."
-  [req]
+(def init-opts
+  "Datastar attributes for the element that owns the page-level SSE connection."
   (let [action connection-action]
     {:data-signals:tab-id tab-id-js
      :data-init action
